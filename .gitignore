@@ -2,6 +2,9 @@ __pycache__/
 
 data/
 
+src/data_exploration/*
+!src/data_exploration/data_exploration.py
+
 venv/
 .venv/
 env/
