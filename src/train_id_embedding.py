@@ -306,12 +306,12 @@ def train_one_step(
             Embeddings and scalar loss value.
     """
 
-    # Mmve images and labels to target device
+    # Move images and labels to target device
     # two views from the same class are concatenated into one larger batch
     with torch.no_grad():
         images_1 = images_1.to(device)
         images_2 = images_2.to(device)
-        images = torch.cat([images_1, images_2], dim=0)
+        images = torch.cat([images_1, images_2], dim=0)  # shape: [batch_size1 + batch_size2, height, width, channels]
         labels = torch.cat([labels, labels]).to(device)
 
     optimizer.zero_grad()
@@ -614,8 +614,8 @@ def main() -> None:
                 image_encoder=image_encoder,
                 optimizer=optimizer,
                 loss_object=loss_object,
-                images_1=images_1,
-                images_2=images_2,
+                images_1=images_1,  # shape: [batch_size1, height, width, channels]
+                images_2=images_2,  # shape: [batch_size2, height, width, channels]
                 labels=labels,
                 device=device
             )
