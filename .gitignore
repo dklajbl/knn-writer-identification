@@ -1,6 +1,7 @@
 __pycache__/
 
 data/
+tmp/
 
 src/data_exploration/*
 !src/data_exploration/data_exploration.py

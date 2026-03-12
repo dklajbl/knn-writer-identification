@@ -3,8 +3,9 @@ import numpy as np
 import lmdb
 import matplotlib.pyplot as plt
 
-LINE_FILE_PATH = "/storage/plzen1/home/xkiszk00/data/lines.filtered_max_width.all"
-DATA_PATH = "/storage/plzen1/home/xkiszk00/data/lmdb.hwr_40-1.0/"
+from src.env_vars import ALL_LINE_FILE_PATH, LMDB_PATH
+from src.utils import read_line_file
+
 OUT_DIR = "samples"
 
 NUM_AUTHORS = 10
@@ -14,25 +15,12 @@ def prepare_output_directory(dir=OUT_DIR):
     if not os.path.exists(dir):
         os.makedirs(dir)
 
-def read_line_file():
-    data = dict()
-    authors = []
-    with open(LINE_FILE_PATH, "r", encoding="utf-8") as f:
-        for line in f:
-            file, author_id, *_ = line.split()
-            authors.append(int(author_id))
-            data[int(author_id)] = data.get(int(author_id), []) + [file]
-
-    authors = list(set(authors))
-    authors.sort()
-    return data, authors
-
 def sample_data():
     prepare_output_directory("samples")
     data, authors = read_line_file()
 
     # Extract samples for the first NUM_AUTHORS authors and save them to the output directory
-    env = lmdb.open(DATA_PATH, readonly=True)
+    env = lmdb.open(LMDB_PATH, readonly=True)
     with env.begin() as txn:
         for author_id in authors[:NUM_AUTHORS]:
             files = data[author_id][:MAX_NUM_SAMPLES_PER_AUTHOR]
