@@ -246,6 +246,7 @@ def pil_to_jpg_bytes(image: Image.Image, jpg_quality: int = 95) -> bytes | None:
 
     return encoded.tobytes()
 
+
 def write_lines_to_lmdb(
     lmdb_path: str,
     lines: list[dict[str, Any]],
@@ -309,6 +310,7 @@ def write_lines_to_lmdb(
     env.close()
 
     return written, skipped
+
 
 def write_index_file(lines: list[dict[str, Any]]) -> None:
 
