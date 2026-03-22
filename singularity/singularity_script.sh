@@ -19,6 +19,5 @@ nvidia-smi
 echo ""
 echo "==== Running program ===="
 
-cd  /workspace
-ls -l
-#python3 ./main.py
+cd /workspace
+python3 ./src/main.py
