@@ -3,7 +3,9 @@ from typing import Literal
 from dataclasses import dataclass
 
 
-PatchMethod = Literal["grid", "random", "algorithmic"]  # all supported patching methods
+# all supported patching methods
+PATCH_METHODS = ["grid", "random", "algorithmic"]
+PatchMethodLiteral = Literal["grid", "random", "algorithmic"]  # a literal for variable types
 
 
 @dataclass(frozen=True)
@@ -27,7 +29,7 @@ class PatcherConfig:
         interpolation (default = cv2.INTER_LINEAR): OpenCV interpolation flag used when resizing patches
     """
 
-    method: PatchMethod = "grid"
+    method: PatchMethodLiteral = "grid"
     patch_count: int = 16
     random_seed: int | None = None
 
