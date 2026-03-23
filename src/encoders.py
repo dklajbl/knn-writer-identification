@@ -1,5 +1,6 @@
 import torch
 import math
+import torch.nn.functional as F
 
 
 def create_vgg_block(
@@ -88,10 +89,68 @@ class PositionalEncoding(torch.nn.Module):
         return x + self.pe[:x.size(0)]
 
 
+class PatchAttentionPooling(torch.nn.Module):
+
+    """
+    Attention-like pooling over patch embeddings.
+
+    Input: [batch_size, patch_count, embedding_dim]
+    Output: [batch_size, embedding_dim]
+    """
+
+    def __init__(self, dim: int):
+
+        """
+        Parameters:
+            dim (int): Dimensionality of each patch embedding.
+        """
+
+        super().__init__()
+
+        self.score = torch.nn.Sequential(
+            torch.nn.Linear(dim, dim),
+            torch.nn.Tanh(),
+            torch.nn.Linear(dim, 1)
+        )
+
+    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+
+        """
+        Pool patch embeddings into one image embedding.
+
+        Parameters:
+            x (torch.Tensor): Patch embeddings of shape [batch_size, patch_count, dim].
+
+        Returns:
+            tuple[torch.Tensor, torch.Tensor]:
+                - pooled: Tensor of shape [batch_size, dim].
+                - attention_weights: Tensor of shape [batch_size, patch_count].
+        """
+
+        # compute one scalar score per patch
+        scores = self.score(x).squeeze(-1)  # [B, P]
+
+        # convert scores into normalized weights
+        attention_weights = torch.softmax(scores, dim=1)  # [B, P]
+
+        # weighted sum across patches
+        pooled = torch.sum(x * attention_weights.unsqueeze(-1), dim=1)  # [B, D]
+
+        return pooled, attention_weights
+
 class Encoder(torch.nn.Module):
 
     """
-    Image encoder that combines CNN feature extraction, positional encoding, transformer sequence modeling, and final embedding projection.
+    Encoder for patched text images
+
+    Expected input: [batch_size, patch_count, channels, height, width]
+
+    Processing steps:
+        1. Encode each patch independently with CNN + transformer.
+        2. Obtain one embedding per patch.
+        3. Aggregate patch embeddings into one image-level embedding.
+
+    Output: [batch_size, dim]
     """
 
     def __init__(self, dim: int = 256):
@@ -128,46 +187,101 @@ class Encoder(torch.nn.Module):
             num_layers=3
         )
 
-        # final projection maps transformer features to the target embedding size
-        self.output_layer = torch.nn.Sequential(
+        # projection from patch-level transformer feature to patch embedding
+        self.patch_output_layer = torch.nn.Sequential(
             torch.nn.LeakyReLU(),
             torch.nn.Linear(512, dim)
         )
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # patch aggregation module.
+        self.patch_pool = PatchAttentionPooling(dim=dim)
+
+    def encode_single_patch_batch(self, x: torch.Tensor) -> torch.Tensor:
 
         """
-        Encode input image batch into normalized embedding vectors.
+        Encode a batch of individual patches.
 
         Parameters:
-            x (torch.Tensor): Input tensor of shape [batch_size, channels, height, width].
+            x (torch.Tensor): Tensor of shape [batch_size, channels, height, width].
 
         Returns:
-            torch.Tensor: Normalized embedding tensor of shape [batch_size, dim].
+            torch.Tensor: Patch embeddings of shape [batch_size, dim].
         """
 
-        # Step 1: extract convolutional feature maps
-        x = self.conv(x)
-        x = x[:, :, 0]
+        # step 1: local visual feature extraction
+        x = self.conv(x)  # [B, 512, H', W']
+        x = x[:, :, 0]  # [B, 512, W']
 
-        # transformer expects sequence-first format: [seq_len, batch_size, embedding_dim]
-        # width becomes sequence length, channels become embedding dimension
-        x = x.permute(2, 0, 1)
+        # transformer expects [seq_len, batch_size, embedding_dim]
+        x = x.permute(2, 0, 1)  # [W', B, 512]
 
-        # add positional information so transformer knows token order in the sequence
+        # add positional information along the sequence dimension
         x = self.pos_enc(x)
 
-        # Step 2: model long-range dependencies across the sequence
-        x = self.transformer_encoder(x)
-        x = x.permute(1, 2, 0)  # convert back to [batch_size, channels, seq_len] for pooling.
+        # Step 2: sequence modeling across width
+        x = self.transformer_encoder(x)  # [W', B, 512]
+        x = x.permute(1, 2, 0)  # [B, 512, W'] - convert back to [batch_size, channels, seq_len] for pooling
 
-        # Step 3: pool across the sequence dimension to get one vector per sample
-        x = torch.nn.functional.adaptive_avg_pool1d(x, 1)
-        x = x[:, :, 0]  # remove the final singleton sequence dimension.
+        # Step 3: reduce sequence to one feature vector per patch.
+        x = F.adaptive_avg_pool1d(x, 1)  # [B, 512, 1]
+        x = x[:, :, 0]  # [B, 512] - remove the final singleton sequence dimension
 
-        # Step 4: project pooled features to the final embedding space
-        x = self.output_layer(x)
+        # Step 4: project to patch embedding space
+        x = self.patch_output_layer(x)  # [B, dim]
 
-        x = torch.nn.functional.normalize(x)  # normalize embeddings to unit length (useful for similarity comparison with dot product / cosine similarity)
+        # normalize patch embeddings.
+        x = F.normalize(x, dim=1)
 
         return x
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        return_patch_weights: bool = False
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+
+        """
+        Encode patched images into one embedding per original image.
+
+        Parameters:
+             x (torch.Tensor): Tensor of shape [batch_size, patch_count, channels, height, width].
+             return_patch_weights (bool, default=False): if True, also return the learned patch attention weights
+
+        Returns:
+            torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+                - if return_patch_weights=False: Tensor of shape [batch_size, dim]
+                - if return_patch_weights=True: (
+                      image_embeddings: [batch_size, dim],
+                      patch_weights:    [batch_size, patch_count]
+                  )
+
+        Raises:
+            ValueError: if input shape is invalid
+        """
+
+        if x.ndim != 5:
+            raise ValueError(
+                f"Expected input of shape [batch_size, patch_count, channels, height, width], got {x.shape}"
+            )
+
+        batch_size, patch_count, channels, height, width = x.shape
+
+        # flatten patches into a standard image batch.
+        x = x.view(batch_size * patch_count, channels, height, width)
+
+        # encode each patch independently.
+        patch_embeddings = self.encode_single_patch_batch(x)  # [B * P, D]
+
+        # restore patch structure
+        patch_embeddings = patch_embeddings.view(batch_size, patch_count, -1)  # [B, P, D]
+
+        # aggregate patch embeddings into one image embedding.
+        image_embeddings, patch_weights = self.patch_pool(patch_embeddings)  # [B, D], [B, P]
+
+        # normalize final image embeddings again after pooling.
+        image_embeddings = F.normalize(image_embeddings, dim=1)
+
+        if return_patch_weights:
+            return image_embeddings, patch_weights
+
+        return image_embeddings
