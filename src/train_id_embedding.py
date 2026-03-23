@@ -16,7 +16,7 @@ from pytorch_metric_learning import losses
 
 from src.encoders import Encoder
 from src.id_dataset import IdDataset
-from tsne import plot_tsne
+from src.tsne import plot_tsne
 
 from src.patchers.patcher_config import PatcherConfig, PATCH_METHODS
 
