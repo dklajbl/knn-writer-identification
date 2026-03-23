@@ -11,8 +11,8 @@ import numpy as np
 import imgaug.augmenters as iaa
 import torch
 
-from patchers.patcher_config import PatcherConfig
-from patchers.make_patcher import make_patcher
+from src.patchers.patcher_config import PatcherConfig
+from src.patchers.make_patcher import make_patcher
 
 
 logger = logging.getLogger(__name__)

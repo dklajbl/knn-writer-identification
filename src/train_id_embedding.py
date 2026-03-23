@@ -14,13 +14,13 @@ from torch.utils.data import DataLoader
 
 from pytorch_metric_learning import losses
 
-from encoders import Encoder
-from id_dataset import IdDataset
+from src.encoders import Encoder
+from src.id_dataset import IdDataset
 from tsne import plot_tsne
 
-from patchers.patcher_config import PatcherConfig, PATCH_METHODS
+from src.patchers.patcher_config import PatcherConfig, PATCH_METHODS
 
-from env_vars import NP_RANDOM_SEED
+from src.env_vars import NP_RANDOM_SEED
 
 
 logger = logging.getLogger(__name__)
