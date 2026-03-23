@@ -8,7 +8,11 @@
 
 # >>> EDIT REQUIRED <<<
 # edit the paths above ^ to match reality (for PBS -o and PBS -e)
-# this will make sure no extra metacentrum stdout and stderr capture files will be created
+# this specifies where this jobs stdout and stderr will be captured each run
+# if not specified, PBS creates new capture files each time
+#
+# this script creates custom log files in /knn_job_logs/
+# so these two files will not contain any relevant information
 
 # =========================================
 # switch between CPU and GPU mode
@@ -83,6 +87,8 @@ echo ""
 # if scratch directory is not set, issue error message and exit
 test -n "$SCRATCHDIR" || { echo "Variable SCRATCHDIR is not set!" >&2; exit 1; }
 
+# >>> EDIT REQUIRED <<<
+# here you write copy commands, that copy code and everything you need to scratch dir
 echo "Copying code to SCRATCH"
 cp -R $CODE_DIR $SCRATCHDIR || { echo "Error while copying input file(s)!" >&2; exit 2; }
 
@@ -110,9 +116,9 @@ fi
 echo "Finished singularity execution"
 
 # >>> EDIT REQUIRED <<<
-## here you should copy results from scratch dir to home dir
+# here you write copy commands, that copy results from scratch dir to home dir
 # echo "Copying results back to home"
-# cp output.txt $HOME_FOLDER/... || { echo >&2 "Result file(s) copying failed (with a code $?) !!"; exit 4; }
+# cp output.txt $LOG_DIR || { echo >&2 "Result file(s) copying failed (with a code $?) !!"; exit 4; }
 
 echo "JOB END"
 
