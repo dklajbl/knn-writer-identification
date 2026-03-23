@@ -11,6 +11,9 @@ import numpy as np
 import imgaug.augmenters as iaa
 import torch
 
+from patchers.patcher_config import PatcherConfig
+from patchers.make_patcher import make_patcher
+
 
 logger = logging.getLogger(__name__)
 
@@ -34,7 +37,8 @@ class IdDataset(torch.utils.data.Dataset):
         augment: bool = True,
         restrict_data: bool = False,
         test: bool = False,
-        page: bool = False
+        page: bool = False,
+        patcher_config: PatcherConfig | None = None,
     ):
         """
         Initialize the dataset
@@ -43,17 +47,21 @@ class IdDataset(torch.utils.data.Dataset):
             file_name (str): Path to the file containing image names and IDs.
             lmdb_path (str): Path to the LMDB database
             width (int): Target image width
-            transform (callable?): Optional transform applied to images (resize, toTensor, ...)
+            transform (callable): transform applied to images (resize, toTensor, ...)
             augment (bool): Whether to use image augmentation or not
             restrict_data (bool): Whether to restrict dataset size
             test (bool): Whether the dataset is used in test mode
             page (bool): Whether dataset works in page mode
+            patcher_config (PatcherConfig): Patcher configuration
 
-        Returns:
-            None
+        Raises:
+            ValueError: if patcher config is not defined
         """
 
         super().__init__()
+
+        if patcher_config is None:
+            raise ValueError("patcher_config must be provided. Images are always patched.")
 
         self.file_name = file_name
         self.lmdb_path = lmdb_path
@@ -63,6 +71,8 @@ class IdDataset(torch.utils.data.Dataset):
         self.restrict_data = restrict_data
         self.test = test
         self.page = page
+
+        self.patcher = make_patcher(patcher_config)
 
         # LMDB objects are initialized lazily, this prevents problems with multiprocessing DataLoaders
         self.env = None
@@ -503,6 +513,9 @@ class IdDataset(torch.utils.data.Dataset):
 
         Returns:
             tuple: (image_1, image_2, line_cluster_id)
+
+        Raises:
+            ValueError: when no transform is provided for the patches of each image
         """
 
         image_1 = self._read_line(self.lines[idx][1])
@@ -521,9 +534,16 @@ class IdDataset(torch.utils.data.Dataset):
         if self.aug is not None:
             image_1, image_2 = self.aug(images=[image_1, image_2])
 
-        if self.transform:
-            image_1 = self.transform(image_1)
-            image_2 = self.transform(image_2)
+        # patch both images
+        image_1 = self.patcher.extract_patches(image_1)
+        image_2 = self.patcher.extract_patches(image_2)
+
+        if self.transform is None:
+            raise ValueError("transform must be provided when using patched images.")
+
+        # convert each patch separately: (N, H, W, C) -> (N, C, H, W)
+        image_1 = torch.stack([self.transform(patch) for patch in image_1], dim=0)
+        image_2 = torch.stack([self.transform(patch) for patch in image_2], dim=0)
 
         return image_1, image_2, line_cluster_id
 
