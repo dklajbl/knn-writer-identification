@@ -503,7 +503,32 @@ class IdDataset(torch.utils.data.Dataset):
 
         return page_id
 
-    def __getitem__(self, idx: int):
+    def get_original_image1(self, idx: int) -> torch.Tensor:
+
+        """
+        Get an original image in full, without it being patched (augmentation and transforms are still not skipped only patching method)
+
+        Parameters:
+            idx (int): Dataset index.
+
+        Returns:
+            torch.Tensor: Original image without it being patched.
+        """
+
+        image = self._read_line(self.lines[idx][1])
+
+        if self.page:
+            image = image[0]
+
+        if self.aug is not None:
+            image = self.aug(images=[image])
+
+        if self.transform:
+            image = self.transform(image)
+
+        return image
+
+    def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor, int]:
 
         """
         Return a positive pair of images from the same ID.
@@ -512,7 +537,7 @@ class IdDataset(torch.utils.data.Dataset):
             idx (int): Dataset index.
 
         Returns:
-            tuple: (image_1, image_2, line_cluster_id)
+            tuple[torch.Tensor, torch.Tensor, int]: (image_1, image_2, line_cluster_id)
 
         Raises:
             ValueError: when no transform is provided for the patches of each image
