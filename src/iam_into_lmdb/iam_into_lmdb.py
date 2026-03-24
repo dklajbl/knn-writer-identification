@@ -34,8 +34,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--xmls-path", help="Path to a directory containing PAGE-XML (.xml) files.", type=str, required=True)
     parser.add_argument("--map-file", help="File (.txt) mapping page to its writer ID.", type=str, required=True)
     parser.add_argument("--lmdb", help="Path to LMDB directory.", type=str, required=True)
-    parser.add_argument("--vpad", help="Additional vertical padding for each extracted line", type=int, required=False, default=10)
-    parser.add_argument("--jpg-quality", help="JPEG quality for stored line images.", type=int, required=False, default=95)
+    parser.add_argument("--vpad", help="Additional vertical padding for each extracted line (default=10)", type=int, required=False, default=10)
+    parser.add_argument("--jpg-quality", help="JPEG quality for stored line images (default=95).", type=int, required=False, default=95)
 
     return parser.parse_args()
 
@@ -345,7 +345,7 @@ def main() -> None:
         format="%(asctime)s | %(levelname)s | %(message)s"
     )
 
-    args = parse_args()  # parse arguments
+    args = parse_args()  # parse terminal arguments
 
     # check for paths
     if not os.path.exists(args.images_path) or not os.path.isdir(args.images_path):
@@ -377,7 +377,6 @@ def main() -> None:
             writer_id=int(writer_id) + 10_000,  # + 10000, to make sure the writer ID is unique across ALL datasets
             vpad=args.vpad
         )
-
 
         if lines_of_page is None:
             continue
