@@ -1,5 +1,6 @@
-from src.patchers.grid_patcher import GridPatcher
 from src.patchers.patcher_config import PatcherConfig
+from src.patchers.grid_patcher import GridPatcher
+from src.patchers.random_patcher import RandomPatcher
 
 
 def make_patcher(config: PatcherConfig) -> GridPatcher:
@@ -12,6 +13,7 @@ def make_patcher(config: PatcherConfig) -> GridPatcher:
 
     Returns:
         - GridPatcher instance: an initialized grid patcher object
+        - RandomPatcher instance: an initialized random patcher object
         - ... (other instances of different patching methods)
 
     Raises:
@@ -23,7 +25,7 @@ def make_patcher(config: PatcherConfig) -> GridPatcher:
         return GridPatcher(config)
 
     if config.method == "random":
-        raise NotImplementedError("Random patcher not implemented yet.")
+        return RandomPatcher(config)
 
     if config.method == "algorithmic":
         raise NotImplementedError("Algorithmic patcher not implemented yet.")
