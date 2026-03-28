@@ -1,7 +1,14 @@
-from src.env_vars import ALL_LINE_FILE_PATH
+import os
+
+from src.env_vars import INTERN_AUTHORS_FILE_PATH
 
 
-def read_line_file(line_file_path=ALL_LINE_FILE_PATH):
+def prepare_output_directory(name):
+    if not os.path.exists(name):
+        os.makedirs(name)
+
+
+def read_line_file(line_file_path=INTERN_AUTHORS_FILE_PATH):
     """
         Read the line file and return author-file mappings.
 
