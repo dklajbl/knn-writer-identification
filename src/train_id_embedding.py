@@ -62,6 +62,20 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument("--patch-count", type=int, default=50)
 
+    parser.add_argument(
+        "--patch-height",
+        type=int,
+        default=32,
+        help="Patch height used by random/algorithmic patchers (not useful for --patcher=grid)."
+    )
+
+    parser.add_argument(
+        "--patch-width",
+        type=int,
+        default=32,
+        help="Patch width used by random/algorithmic patchers (not useful for --patcher=grid)."
+    )
+
     parser.add_argument("--width", type=int, default=320)
 
     parser.add_argument("--start-iteration", default=0, type=int)
@@ -191,7 +205,9 @@ def create_dataloaders(args) -> tuple[DataLoader, DataLoader | None]:
     patcher_config = PatcherConfig(
         method=args.patcher,
         patch_count=args.patch_count,
-        random_seed=NP_RANDOM_SEED
+        random_seed=NP_RANDOM_SEED,
+        patch_height=args.patch_height,
+        patch_width=args.patch_width
     )
 
     # training dataset uses augmentation

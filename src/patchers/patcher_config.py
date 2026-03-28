@@ -27,6 +27,8 @@ class PatcherConfig:
                 This is useful for text images because too many rows can break the reading structure, especially for wide line images
         resize_patches (default = True): if True, patches are resized to a common shape before stacking
         interpolation (default = cv2.INTER_LINEAR): OpenCV interpolation flag used when resizing patches
+        patch_height (default = 32): height of each patch (only used for random or algorithmic patching)
+        patch_width (default = 32): width of each patch (only used for random or algorithmic patching)
     """
 
     method: PatchMethodLiteral = "grid"
@@ -37,3 +39,7 @@ class PatcherConfig:
     max_rows: int | None = 4
     resize_patches: bool = True
     interpolation: int = cv2.INTER_LINEAR
+
+    # random / algorithmic patch size
+    patch_height: int = 20
+    patch_width: int = 20
