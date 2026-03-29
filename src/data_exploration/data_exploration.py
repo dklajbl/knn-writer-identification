@@ -3,7 +3,7 @@ import numpy as np
 import lmdb
 import matplotlib.pyplot as plt
 
-from src.env_vars import ALL_LINE_FILE_PATH, LMDB_PATH
+from src.env_vars import LMDB_PATH
 from src.utils import read_line_file
 
 OUT_DIR = "samples"
