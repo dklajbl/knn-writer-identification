@@ -6,7 +6,6 @@ import numpy as np
 import torch
 from sklearn.metrics import average_precision_score, roc_auc_score, roc_curve
 from torch.utils.data import DataLoader
-import random
 
 # from collections import defaultdict
 
@@ -172,7 +171,10 @@ def _measure_mrr(full_ranking_labels: np.ndarray, query_labels: np.ndarray):
     return mrr
 
 
-def _measure_open_set_performance(full_ranking_labels, full_ranking_scores, query_labels):
+def _measure_open_set_performance(full_ranking_labels: np.ndarray,
+                                  full_ranking_scores: np.ndarray,
+                                  query_labels: np.ndarray):
+
     """
     Measure open set performance.
 
@@ -182,113 +184,120 @@ def _measure_open_set_performance(full_ranking_labels, full_ranking_scores, quer
         query_labels (np.ndarray): Sorted labels. Shape (N_labels)
 
     Returns:
-        thresholds (np.ndarray): Thresholds.
-        TPR(t) (np.ndarray): True Positive Rate for each threshold.
-        TPR(t) (np.ndarray): False Positive Rate for each threshold.
+        thresholds (np.ndarray): Thresholds. Shape (N_thresholds).
+        DIR(t) (np.ndarray): Detection and Identification Rate. Shape (N_thresholds).
+        FRR(t) (np.ndarray): False Reject Rate (False Negative Rate). Shape (N_thresholds).
+        TAR(t) (np.ndarray): True Accept Rate. Shape (N_thresholds).
+        FAR(t) (np.ndarray): False Accept Rate (True Positive Rate). Shape (N_thresholds).
     """
 
-    # TODO check len(full_ranking_labels) > 2 len(full_ranking_labels[0]) > 2
-
-    random.seed(42)
-
-    N_queries = len(query_labels)
-
-    # get best labels and their scores
-    top1_labels = full_ranking_labels[:, 0]
-    top1_scores = full_ranking_scores[:, 0]
-
-    # get second best labels and their scores
-    top2_labels = full_ranking_labels[:, 1]
-    top2_scores = full_ranking_scores[:, 1]
-
-    # known queries use best labels and their scores
-    top1_labels_known = top1_labels
-    top1_scores_known = top1_scores
-
-    # unknown queries use best or second best label
-    # if the best label matches query target label, then get the second best label and score
-    # this simulates exclusion of the unknown query label prototype from gallery
-    matches = (top1_labels == query_labels)
-    top1_labels_unknown = np.where(
-        matches,
-        top2_labels,
-        top1_labels
-    )
-    top1_scores_unknown = np.where(
-        matches,
-        top2_scores,
-        top1_scores
-    )
-
     # get unique lables and the start idexes to same label segments (query_labels is sorted)
-    unique_query_labels, start_idxs = np.unique(query_labels, return_index=True)
+    labels = np.unique(query_labels)
 
-    # TODO reapeat 10 times
+    rng = np.random.default_rng(42)
 
-    # mark 20% of queries for each label as unknown, the rest are known
-    unknown_query_idxs = []
-    for i in range(len(unique_query_labels)):
-        start = start_idxs[i]
-        if i + 1 < len(unique_query_labels):
-            end = start_idxs[i + 1]
-        else:
-            end = len(unique_query_labels)
+    # TODO repeat following experiment 5 - 10 times
 
-        # 20% of queires with given label
-        k = (end - start) // 5
+    # STEP 1: Select 20% of labels to withold from gallery
 
-        # get indexes of the 20% unknown queries
-        unknown_query_idxs += random.sample(range(start, end), k)
+    N_labels = len(labels)
+    N_labels_unknown = int(0.2 * len(labels))
+    # N_labels_known = N_labels - N_labels_unknown
 
-    unknown_query_mask = np.zeros_like(query_labels, dtype=bool)
-    unknown_query_mask[unknown_query_idxs] = True
+    # (N_labels_unknown)
+    unknown_label_idx = rng.choice(N_labels, size=N_labels_unknown, replace=False)
 
-    # calcualte known and unknown query count
+    # (N_labels_unknown)
+    unknown_labels = labels[unknown_label_idx]
+
+    # STEP 2: Mark queries as unknown, based on withold labels
+
+    # (N_queries)
+    unknown_query_mask = np.isin(query_labels, unknown_labels)
+    known_query_mask = ~unknown_query_mask
+
     N_queries = len(query_labels)
     N_queries_unknown = np.sum(unknown_query_mask)
     N_queries_known = N_queries - N_queries_unknown
+
+    # STEP 3: Remove withold (unknown) labels and their scores from ranking
+
+    # True if label is in unknowns
+    # (N_queries, N_labels)
+    mask = ~np.isin(full_ranking_labels, unknown_labels)
+
+    # (N_queries, N_labels) = full_ranking_labels
+    # (N_queries * (N_labels - N_labels_unknown)) = full_ranking_labels[mask]  (boolean indexing flattens array)
+    # (N_queries, N_labels - N_labels_unknown) = full_ranking_labels[mask].reshape(N_queries, -1)
+    full_ranking_labels_k = full_ranking_labels[mask].reshape(N_queries, -1)
+    full_ranking_scores_k = full_ranking_scores[mask].reshape(N_queries, -1)
+
+    # STEP 4: Get best labels and their scores
+
+    # (N_queries)
+    top1_labels = full_ranking_labels_k[:, 0]
+    top1_scores = full_ranking_scores_k[:, 0]
+
+    # STEP 5: Get statistics for each possible threshold
 
     # generate thresholds
     N_thresholds = 100
     thresholds = np.linspace(-1, 1, num=N_thresholds, endpoint=True)
 
-    # (N_thresholds)
-    known_accepted_correct = np.zeros_like(N_thresholds, dtype=np.int32)
-    known_accepted_wrong = np.zeros_like(N_thresholds, dtype=np.int32)
-    known_rejected = np.zeros_like(N_thresholds, dtype=np.int32)
-    unknown_rejected = np.zeros_like(N_thresholds, dtype=np.int32)
-    unknown_accepted = np.zeros_like(N_thresholds, dtype=np.int32)
+    # (N_queries, 1) = top1_scores[:, None]
+    # (1, N_thresholds) = thresholds[None, :]
+    # (N_queries, N_thresholds) = (N_queries, 1) > (1, N_thresholds)
+    accepted_mask = (top1_scores[:, None] > thresholds[None, :])
 
-    # TODO remove loop and vectorize
-    for i in range(N_queries):
-        if unknown_query_mask[i]:  # is unknwon query
-            # (N_thresholds)
-            accepted_mask = top1_scores_unknown[i] > thresholds
-            # (N_thresholds)
-            rejected_mask = ~accepted_mask
+    # (N_queries) = unknown_query_mask
+    # (N_queries, 1) = unknown_query_mask[:, None]
+    # (N_queries, N_thresholds) = (N_queries, N_thresholds) & (N_queries, 1)
+    unknown_accepted_mask = unknown_query_mask[:, None] & accepted_mask
+    # unknown_rejected_mask = unknown_query_mask[:, None] & (~accepted_mask)
 
-            unknown_accepted[accepted_mask] += 1
-            unknown_rejected[rejected_mask] += 1
-        else:  # is known query
-            # (N_thresholds)
-            accepted_mask = top1_scores_known[i] > thresholds
-            rejected_mask = ~accepted_mask
-            correct = top1_labels_known[i] == query_labels[i]
-            accepted_correct_mask = accepted_mask & correct
-            accepted_wrong_mask = accepted_mask & (~correct)
+    # (N_thresholds) = (N_queries, N_thresholds) .sum(axis=0)
+    unknown_accepted = unknown_accepted_mask.sum(axis=0)
+    # unknown_rejected = unknown_rejected_mask.sum(axis=0)
 
-            known_accepted_correct[accepted_correct_mask] += 1
-            known_accepted_wrong[accepted_wrong_mask] += 1
-            known_rejected[rejected_mask] += 1
+    # (N_queries) = (N_queries) == (N_queries)
+    correct = (top1_labels == query_labels)
+    # wrong = ~correct
 
-    true_positive_rate = known_accepted_correct / N_queries_known
-    false_positive_rate = unknown_accepted / N_queries_unknown
-    # TODO compute other matrics
+    # (N_queries, N_thresholds) = (N_queries, 1) & (N_queries, N_thresholds)
+    known_accepted_mask = known_query_mask[:, None] & accepted_mask
+    known_rejected_mask = known_query_mask[:, None] & (~accepted_mask)
 
-    return thresholds, true_positive_rate, false_positive_rate
+    # (N_queries, N_thresholds) = (N_queries, N_thresholds) & (N_queries, 1)
+    known_accepted_correct_mask = known_accepted_mask & correct[:, None]
+    # known_accepted_wrong_mask = known_accepted_mask & wrong[:, None]
+
+    # (N_thresholds) = (N_queries, N_thresholds).sum(axis=0)
+    known_accepted_correct = known_accepted_correct_mask.sum(axis=0)
+    # known_accepted_wrong = known_accepted_wrong_mask.sum(axis=0)
+    known_rejected = known_rejected_mask.sum(axis=0)
+
+    # STEP 6: Calcualte matrics based on statistics
+
+    # DIR = Detection and Identification Rate
+    # (num. of KNOWN probes ACCEPTED and CORRECTLY IDENTIFIED) / (total num. of KNOWN probes)
+    DIR_t = known_accepted_correct / N_queries_known
+
+    # FRR = False Reject Rate (FNR = False Negative Rate)
+    # (num. of KNOWN probes REJECTED) / (total num. of KNOWN probes)
+    FRR_t = known_rejected / N_queries_known
+
+    # TAR = True Accept Rate (Acceptance Rate)
+    # (num. of KNOWN probes ACCEPTED) / (total num. of KNOWN probes)
+    TAR_t = 1 - FRR_t
+
+    # FAR = False Accept Rate (TPR = False Positive Rate)
+    # (num. of UNKNOWN probes ACCEPTED) / (total num. of UNKNOWN probes)
+    FAR_t = unknown_accepted / N_queries_unknown
+
+    return thresholds, DIR_t, FRR_t, TAR_t, FAR_t
 
 
-def test_identif(
+def test_identification(
         encoder: torch.nn.Module,
         gallery_dataloader: DataLoader,
         query_dataloader: DataLoader,
