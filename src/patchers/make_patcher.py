@@ -1,6 +1,7 @@
 from src.patchers.patcher_config import PatcherConfig
 from src.patchers.grid_patcher import GridPatcher
 from src.patchers.random_patcher import RandomPatcher
+from src.patchers.sift_patcher import SIFTPatcher
 
 
 def make_patcher(config: PatcherConfig) -> GridPatcher:
@@ -27,7 +28,7 @@ def make_patcher(config: PatcherConfig) -> GridPatcher:
     if config.method == "random":
         return RandomPatcher(config)
 
-    if config.method == "algorithmic":
-        raise NotImplementedError("Algorithmic patcher not implemented yet.")
+    if config.method == "sift":
+        return SIFTPatcher(config)
 
     raise ValueError(f"Unknown patch method: {config.method}")
