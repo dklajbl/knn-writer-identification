@@ -1,8 +1,8 @@
-import cv2
 import math
 import numpy as np
 from src.patchers.base_patcher import BasePatcher
 from src.patchers.patcher_config import PatcherConfig
+from src.patchers.utils import normalize_patch_size
 
 
 class GridPatcher(BasePatcher):
@@ -200,12 +200,7 @@ class GridPatcher(BasePatcher):
         normalized_patches = []
 
         for patch in patches:
-            if patch.shape[:2] != (target_height, target_width):
-                patch = cv2.resize(
-                    patch,
-                    (target_width, target_height),
-                    interpolation=self.interpolation,
-                )
+            patch = normalize_patch_size(patch, target_height, target_width, self.interpolation)
             normalized_patches.append(patch)
 
         return np.stack(normalized_patches, axis=0)

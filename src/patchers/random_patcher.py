@@ -1,7 +1,7 @@
-import cv2
 import numpy as np
 from src.patchers.base_patcher import BasePatcher
 from src.patchers.patcher_config import PatcherConfig
+from src.patchers.utils import is_empty_or_padded_patch, normalize_patch_size
 
 
 class RandomPatcher(BasePatcher):
@@ -44,65 +44,6 @@ class RandomPatcher(BasePatcher):
         if self.patch_height <= 0 or self.patch_width <= 0:
             raise ValueError("patch_height and patch_width must be > 0")
 
-    @staticmethod
-    def _is_empty_or_padded_patch(
-        patch: np.ndarray,
-        zero_threshold: float = 0.99,
-        std_threshold: float = 2.0,
-    ) -> bool:
-
-        """
-        Decide whether a patch is effectively empty / padded.
-
-        A patch is rejected if:
-            - it is almost entirely zeros
-            - or it is nearly constant
-        Because before augmentation, padded areas are usually exactly zero and after augmentation, padded areas may become nearly constant but not zero.
-
-        Parameters:
-            patch (np.ndarray): Patch of shape (H, W, C).
-            zero_threshold (float): Fraction of zero pixels above which patch is rejected.
-            std_threshold (float): Standard deviation below which patch is treated as almost constant.
-
-        Returns:
-            bool: True if the patch should be rejected, False otherwise.
-        """
-
-        if patch.size == 0:
-            return True
-
-        # exact / near-zero padding detection
-        zero_fraction = np.mean(patch == 0)
-        if zero_fraction >= zero_threshold:
-            return True
-
-        # almost constant region detection - useful when augmentation changes padding from pure zero to some flat value
-        if np.std(patch.astype(np.float32)) < std_threshold:
-            return True
-
-        return False
-
-    def _normalize_patch_size(self, patch: np.ndarray) -> np.ndarray:
-
-        """
-        Resize patch to the output size if needed.
-
-        Parameters:
-            patch (np.ndarray): Input patch
-
-        Returns:
-            np.ndarray: Patch with shape (patch_height, patch_width, C).
-        """
-
-        if patch.shape[:2] != (self.patch_height, self.patch_width):
-            patch = cv2.resize(
-                patch,
-                (self.patch_width, self.patch_height),
-                interpolation=self.interpolation
-            )
-
-        return patch
-
     def _extract_random_patch(
         self,
         image: np.ndarray,
@@ -133,10 +74,10 @@ class RandomPatcher(BasePatcher):
 
         patch = image[y:y + crop_height, x:x + crop_width]
 
-        if skip_empty and self._is_empty_or_padded_patch(patch):
+        if skip_empty and is_empty_or_padded_patch(patch):
             return None
 
-        patch = self._normalize_patch_size(patch)
+        patch = normalize_patch_size(patch, self.patch_height, self.patch_width, self.interpolation)
 
         return patch
 
