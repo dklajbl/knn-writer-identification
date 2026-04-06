@@ -18,3 +18,7 @@ env/
 .DS_Store
 .vscode/
 .idea/
+
+singularity/*.sif
+singularity/job.sh
+singularity/singularity_script.sh
