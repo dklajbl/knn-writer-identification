@@ -5,50 +5,84 @@ from torch.utils.data import DataLoader
 from dataclasses import dataclass
 
 
-@dataclass
-class OpenSetIdentifMetrics:
+@dataclass(frozen=True)
+class OSI_OSCR_Curve:
+    # OSCR: TPIR x FPIR
+    x_fpir: np.ndarray
+    x_fpir_std: np.ndarray | None = None
+    y_tpir: np.ndarray
+    y_tpir_std: np.ndarray | None = None
+    y_thr: np.ndarray
+    y_thr_std: np.ndarray | None = None
+    auc: np.float32
+    auc_std: np.float32 | None = None
+
+
+@dataclass(frozen=True)
+class OSI_ROC_Curve:
+    # ROC: TPR x FPR(FPIR)
+    x_fpr: np.ndarray
+    x_fpr_std: np.ndarray | None = None
+    y_tpr: np.ndarray
+    y_tpr_std: np.ndarray | None = None
+    y_thr: np.ndarray
+    y_thr_std: np.ndarray | None = None
+    auc: np.float32
+    auc_std: np.float32 | None = None
+
+
+@dataclass(frozen=True)
+class OSI_DET_Curve:
+    # DET: FNR(FNIR) vs FPR
+    x_fpr: np.ndarray
+    x_fpr_std: np.ndarray | None = None
+    y_fnr: np.ndarray
+    y_fnr_std: np.ndarray | None = None
+    y_thr: np.ndarray
+    y_thr_std: np.ndarray | None = None
+    auc: np.float32
+    auc_std: np.float32 | None = None
+
+
+@dataclass(frozen=True)
+class OSI_FPIR_OpPoint:
+    # TPIR and Threshold at specific FPIR operating points
+    fpir: np.float32
+    fpir_std: np.float32 | None = None
+    tpir: np.float32
+    tpir_std: np.float32 | None = None
+    thr: np.float32
+    thr_std: np.float32 | None = None
+
+
+@dataclass(frozen=True)
+class OSI_EER:
+    # EER = Equal Error Rate
+    # Point on DET curve, where FPIR ≈ FNIR
+    val: np.float32
+    val_std: np.float32 | None = None
+
+    # EER_thr = Equal Error Rate Threshold
+    # Threshold, where FPIR ≈ FNIR
+    thr: np.float32
+    thr_std: np.float32 | None = None
+
+
+@dataclass(frozen=True)
+class OSI_Metrics:
     """
     Stores open-set identification metrics.
     """
 
-    # Thresholds (all top-1 unique scores).
-    # Shape: (N_thresholds).
-    thrs: np.ndarray
-
-    # TPIR = True Positive Identification Rate.
-    #   (== DIR = Detection and Identification Rate)
-    # TPIR = (num. of KNOWN queries ACCEPTED and CORRECTLY IDENTIFIED)
-    #           / (total num. of KNOWN queries).
-    # Shape: (N_thresholds).
-    TPIR_t: np.ndarray
-
-    # FNIR = False Negative Identification Rate.
-    # FNIR = (num. of KNOWN queries REJECTED or (ACCEPTED and INCORRECTLY IDENTIFIED))
-    #           / (total num. of KNOWN queries)
-    FNIR_t: np.ndarray
-
-    # Known Rejection Rate per threshold.
-    #   (FRR = False Reject Rate)
-    #   (== FNR = False Negative Rate)
-    # KRR = (num. of KNOWN queries REJECTED) / (total num. of KNOWN queries).
-    # Shape: (N_thresholds).
-    KRR_t: np.ndarray
-
-    # Known Accept Rate per threshold.
-    #   (== TAR = True Accept Rate)
-    # KAR = (num. of KNOWN queries ACCEPTED) / (total num. of KNOWN queries).
-    # Shape: (N_thresholds).
-    KAR_t: np.ndarray
-
-    # FPIR = False Positive Identification Rate per threshold.
-    #   (== FAR = False Accept Rate)
-    # FPIR = (num. of UNKNOWN queries ACCEPTED) / (total num. of UNKNOWN queries)
-    # Shape: (N_thresholds).
-    FPIR_t: np.ndarray
+    oscr_curve: OSI_OSCR_Curve
+    roc_curve: OSI_ROC_Curve
+    det_curve: OSI_DET_Curve
+    main_fpir_op_points: dict[float, OSI_FPIR_OpPoint]
+    eer: OSI_EER
 
 
-@dataclass
-class ClosedSetIdentifMetrics:
+@dataclass(frozen=True)
+class CSI_Metrics:
     """
     Stores closed-set identification metrics.
     """
@@ -78,16 +112,16 @@ class ClosedSetIdentifMetrics:
 
 
 @dataclass
-class IdentifMetrics:
+class IdnetificationMetrics:
     """
     Stores (open-set and closed-set) identification metrics.
     """
 
     # Closed-set Identification metrics
-    closed_set_metrics: ClosedSetIdentifMetrics
+    csi_metrics: CSI_Metrics
 
     # Open-set identification metrics
-    open_set_metrics: OpenSetIdentifMetrics
+    osi_metrics: OSI_Metrics
 
     # Measured time of evaluation
     eval_time: np.float32
@@ -96,8 +130,8 @@ class IdentifMetrics:
 # ==========================================
 # CLOSED SET IDENTIFICATION MODEL EVALUATION
 
-def _calc_cmc(full_ranking_labels: np.ndarray,
-              query_labels: np.ndarray):
+def _calc_CSI_cmc(full_ranking_labels: np.ndarray,
+                  query_labels: np.ndarray):
     """
     Calculate CMC (Cumulative Match Characteristic) = accuracy for each possible rank K in 1...N_labels.
     Accuracy for rank K = (Num. of queries with correct label within top K predicted labels) / (Total num. of queries).
@@ -134,8 +168,8 @@ def _calc_cmc(full_ranking_labels: np.ndarray,
     return cmc_curve
 
 
-def _calc_mrr(full_ranking_labels: np.ndarray,
-              query_labels: np.ndarray):
+def _calc_CSI_mrr(full_ranking_labels: np.ndarray,
+                  query_labels: np.ndarray):
     """
     Calculate MRR (Mean Reciprocal Rank) = average of (1 / (correct label rank)) for each query.
 
@@ -166,8 +200,8 @@ def _calc_mrr(full_ranking_labels: np.ndarray,
     return mrr
 
 
-def _calc_closed_set_identif_metrics(full_ranking_labels: np.ndarray,
-                                     query_labels: np.ndarray):
+def _calc_CSI_metrics(full_ranking_labels: np.ndarray,
+                      query_labels: np.ndarray):
     """
     Calculate closed-set identification metrics.
 
@@ -183,24 +217,143 @@ def _calc_closed_set_identif_metrics(full_ranking_labels: np.ndarray,
             Dataclass containing calcualted closed-set identification metrics.
     """
 
-    cmc = _calc_cmc(full_ranking_labels, query_labels)
-    mrr = _calc_mrr(full_ranking_labels, query_labels)
+    cmc = _calc_CSI_cmc(full_ranking_labels, query_labels)
+    mrr = _calc_CSI_mrr(full_ranking_labels, query_labels)
 
     rank_1_acc = cmc[min(0, len(cmc)-1)]
     rank_3_acc = cmc[min(2, len(cmc)-1)]
     rank_5_acc = cmc[min(4, len(cmc)-1)]
     rank_10_acc = cmc[min(9, len(cmc)-1)]
 
-    return ClosedSetIdentifMetrics(CMC=cmc, MRR=mrr,
-                                   rank_1_acc=rank_1_acc, rank_3_acc=rank_3_acc,
-                                   rank_5_acc=rank_5_acc, rank_10_acc=rank_10_acc)
+    return CSI_Metrics(CMC=cmc, MRR=mrr,
+                       rank_1_acc=rank_1_acc, rank_3_acc=rank_3_acc,
+                       rank_5_acc=rank_5_acc, rank_10_acc=rank_10_acc)
 
 # ========================================
 # OPEN SET IDENTIFICATION MODEL EVALUATION
 
 
-def _get_accepted_rejected_counts_per_thr(query_scores: np.ndarray,
-                                          sorted_thrs: np.ndarray):
+def _calc_OSI_metrics_from_counts(
+        thrs_sorted: np.ndarray,
+        N_queries_known: int,
+        N_queries_unknown: int,
+        unknown_accepted_counts: np.ndarray,
+        unknown_rejected_counts: np.ndarray,
+        known_accepted_correct_counts: np.ndarray,
+        known_accepted_wrong_counts: np.ndarray,
+        known_rejected_counts: np.ndarray):
+
+    # TPIR = True Positive Identification Rate.
+    #   (== DIR = Detection and Identification Rate)
+    # TPIR = (num. of KNOWN queries ACCEPTED and CORRECTLY IDENTIFIED)
+    #           / (total num. of KNOWN queries).
+    # Shape: (N_thresholds).
+    TPIR_t = known_accepted_correct_counts / N_queries_known
+
+    # FNIR = False Negative Identification Rate.
+    # FNIR = (num. of KNOWN queries REJECTED or (ACCEPTED and INCORRECTLY IDENTIFIED))
+    #           / (total num. of KNOWN queries)
+    FNIR_t = 1 - TPIR_t
+
+    # FPIR = False Positive Identification Rate per threshold.
+    #   (== FAR = False Accept Rate)
+    # FPIR = (num. of UNKNOWN queries ACCEPTED) / (total num. of UNKNOWN queries)
+    # Shape: (N_thresholds).
+    FPIR_t = unknown_accepted_counts / N_queries_unknown
+
+    # FPR = False Positive Rate = FPIR
+    FPR_t = FPIR_t
+
+    # FNR = False Negative Rate (Known Rejection Rate)
+    # FNR = (num. of KNOWN queries REJECTED) / (total num. of KNOWN queries)
+    FNR_t = known_rejected_counts / N_queries_known
+
+    # TPR = True Positive Rate (Known Acceptance Rate)
+    # TPR = (num. of KNOWN queries ACCEPTED) / (total num. of KNOWN queries)
+    TPR_t = 1 - FNR_t
+
+    # OSCR: TPIR x FPIR
+
+    # have to guarantee, that X value for inteprolation are stricly monotonously ascending
+    _, fpir_unique_idx = np.unique(FPIR_t, return_index=True)
+    fpir_order = fpir_unique_idx[np.argsort(FPIR_t[fpir_unique_idx])]
+
+    fpir_t_sorted = FPIR_t[fpir_order]
+    tpir_t_sorted_by_fpir = TPIR_t[fpir_order]
+    thrs_sorted_by_fpir = thrs_sorted[fpir_order]
+
+    oscr_x_fpir = np.logspace(-4, 0, num=200)  # 0.0001=1e-4 -> 1
+    oscr_y_tpir = np.interp(
+        oscr_x_fpir, fpir_t_sorted, tpir_t_sorted_by_fpir)
+    oscr_y_thr = np.interp(
+        oscr_x_fpir, fpir_t_sorted, thrs_sorted_by_fpir)
+    oscr_auc = np.trapz(tpir_t_sorted_by_fpir, fpir_t_sorted)
+
+    oscr_curve = OSI_OSCR_Curve(x_fpir=oscr_x_fpir,
+                                y_tpir=oscr_y_tpir,
+                                y_thr=oscr_y_thr,
+                                auc=oscr_auc)
+
+    # TPIR @ FPIR=10%, TPIR @ FPIR=1%, TPIR @ FPIR=0.1%, TPIR @ FPIR=0.01%
+    fpir_targets = np.array([1e-1, 1e-2, 1e-3, 1e-4])
+    main_fpir_op_points = {
+        fpir: {
+            OSI_FPIR_OpPoint(
+                fpir=fpir,
+                tpir=np.interp(fpir, fpir_t_sorted, tpir_t_sorted_by_fpir),
+                thr=np.interp(fpir, fpir_t_sorted, thrs_sorted_by_fpir)
+            )
+        }
+        for fpir in fpir_targets
+    }
+
+    # ROC: TPR x FPR(FPIR)
+    tpr_sorted_by_fpir = TPR_t[fpir_order]
+
+    roc_x_fpr = np.logspace(-4, 0, num=200)
+    roc_y_tpr = np.interp(roc_x_fpr, fpir_t_sorted, tpr_sorted_by_fpir)
+    roc_y_thr = np.interp(roc_x_fpr, fpir_t_sorted, thrs_sorted_by_fpir)
+    roc_auc = np.trapz(tpr_sorted_by_fpir, fpir_t_sorted)
+
+    roc_curve = OSI_ROC_Curve(x_fpr=roc_x_fpr,
+                              y_tpr=roc_y_tpr,
+                              y_thr=roc_y_thr,
+                              auc=roc_auc)
+
+    # DET: FNR(FNIR) vs FPR
+    _, fpr_unique_idx = np.unique(FPR_t, return_index=True)
+    fpr_order = fpr_unique_idx[np.argsort(FPR_t[fpr_unique_idx])]
+
+    fpr_t_sorted = FPR_t[fpr_order]
+    fnr_t_sorted_by_fpr = FNR_t[fpr_order]
+    thrs_sorted_by_fpr = thrs_sorted[fpr_order]
+
+    det_x_fpr = np.logspace(-4, 0, num=200)
+    det_y_fnr = np.interp(det_x_fpr, fpr_t_sorted, fnr_t_sorted_by_fpr)
+    det_y_thr = np.interp(det_x_fpr, fpr_t_sorted, thrs_sorted_by_fpr)
+    det_auc = np.trapz(fnr_t_sorted_by_fpr, fpr_t_sorted)
+
+    det_curve = OSI_DET_Curve(x_fpr=det_x_fpr,
+                              y_fnr=det_y_fnr,
+                              y_thr=det_y_thr,
+                              auc=det_auc)
+
+    # Equal Error Rate: FPIR ≈ FNIR
+    eer_idx = np.argmin(np.abs(FPIR_t - FNIR_t))
+    eer_val = (FPIR_t[eer_idx] + FNIR_t[eer_idx]) / 2
+    eer_thr = thrs_sorted[eer_idx]
+
+    eer = OSI_EER(val=eer_val, thr=eer_thr)
+
+    return OSI_Metrics(oscr_curve=oscr_curve,
+                       roc_curve=roc_curve,
+                       det_curve=det_curve,
+                       main_fpir_op_points=main_fpir_op_points,
+                       eer=eer)
+
+
+def _get_OSI_acc_rej_counts_per_thr(query_scores: np.ndarray,
+                                    sorted_thrs: np.ndarray):
     """
     Calculate counts of accepted and rejected queries for each threshold.
     Query is accepted if its score is strictly larger than the threshold.
@@ -245,10 +398,10 @@ def _get_accepted_rejected_counts_per_thr(query_scores: np.ndarray,
     return accepted_counts, rejected_counts
 
 
-def _calc_open_set_identif_metrics_masked(full_ranking_labels_k: np.ndarray,
-                                          full_ranking_scores_k: np.ndarray,
-                                          query_labels: np.ndarray,
-                                          unknown_query_mask: np.ndarray):
+def _calc_OSI_metrics_masked(full_ranking_labels_k: np.ndarray,
+                             full_ranking_scores_k: np.ndarray,
+                             query_labels: np.ndarray,
+                             unknown_query_mask: np.ndarray):
     """
     Calculate open-set identification metrics with masked unknown queries
         (query label does not exist in gallery).
@@ -278,86 +431,59 @@ def _calc_open_set_identif_metrics_masked(full_ranking_labels_k: np.ndarray,
     N_queries_unknown = np.sum(unknown_query_mask)
     N_queries_known = N_queries - N_queries_unknown
 
-    # compute known query mask
-    # (N_queries)
-    known_query_mask = ~unknown_query_mask
-
     # get best labels and their scores
     # (N_queries)
     top1_labels = full_ranking_labels_k[:, 0]
     top1_scores = full_ranking_scores_k[:, 0]
 
-    # STEP 2: Compute query count statistics (rejected, accepted, ...) for each possible threshold
+    # STEP 2: Get thresholds == all uniques scores in sorted order
 
     # generate thresholds
     # (N_thresholds)
     unique_scores = np.unique(top1_scores)
-    sorted_thrs = np.union1d(unique_scores, [0.0, 1.0])
+    sorted_thrs = np.union1d(unique_scores, [-1.0, 1.0])
+
+    # STEP 3: Compute query count statistics (rejected, accepted, ...) for each possible threshold
+
+    # unknown sample count statistics
 
     unknown_query_scores = top1_scores[unknown_query_mask]
 
-    # (N_thresholds)
-    unknown_accepted_counts, _ = _get_accepted_rejected_counts_per_thr(
+    unknown_accepted_counts, unknown_rejected_counts = _get_OSI_acc_rej_counts_per_thr(
         unknown_query_scores, sorted_thrs)
 
+    # known sample count statistics
+
+    known_query_mask = ~unknown_query_mask
     known_query_scores = top1_scores[known_query_mask]
 
-    # (N_thresholds)
-    _, known_rejected_counts = _get_accepted_rejected_counts_per_thr(
+    known_accepted_counts, known_rejected_counts = _get_OSI_acc_rej_counts_per_thr(
         known_query_scores, sorted_thrs)
 
     correct_query_mask = (top1_labels == query_labels)
-
     known_correct_query_mask = correct_query_mask & known_query_mask
-
     known_correct_query_scores = top1_scores[known_correct_query_mask]
 
-    # (N_thresholds)
-    known_accepted_correct_counts, _ = _get_accepted_rejected_counts_per_thr(
+    known_accepted_correct_counts, _ = _get_OSI_acc_rej_counts_per_thr(
         known_correct_query_scores, sorted_thrs)
 
-    # STEP 3: Calcualte (per threshold) metrics
+    known_accepted_wrong_counts = known_accepted_counts - known_accepted_correct_counts
 
-    # TPIR = True Positive Identification Rate
-    #   (DIR = Detection and Identification Rate)
-    # TPIR = (num. of KNOWN queries ACCEPTED and CORRECTLY IDENTIFIED)
-    #           / (total num. of KNOWN queries)
-    TPIR_t = known_accepted_correct_counts / N_queries_known
+    # STEP 4: Calcualte (per threshold) metrics
 
-    # FNIR = False Negative Identification Rate
-    # FNIR = (num. of KNOWN queries REJECTED or (ACCEPTED and INCORRECTLY IDENTIFIED))
-    #           / (total num. of KNOWN queries)
-    #      = 1 - TPIR
-    FNIR_t = 1 - TPIR_t
-
-    # TODO Rename FRR -> KRR
-    # FRR = False Reject Rate (FNR = False Negative Rate)
-    # FRR = (num. of KNOWN queries REJECTED) / (total num. of KNOWN queries)
-    FRR_t = known_rejected_counts / N_queries_known
-
-    # TODO Rename TAR -> KAR
-    # TAR = True Accept Rate (Acceptance Rate)
-    # TAR = (num. of KNOWN queries ACCEPTED) / (total num. of KNOWN queries)
-    TAR_t = 1 - FRR_t
-
-    # FPIR = False Positive Identification Rate
-    #   (FAR = False Accept Rate)
-    # FPIR = (num. of UNKNOWN queries ACCEPTED) / (total num. of UNKNOWN queries)
-    FPIR_t = unknown_accepted_counts / N_queries_unknown
-
-    # TODO TPIR @ FPIR=1%, TPIR @ FPIR=0.1%, TPIR @ FPIR=0.01%
-    # TODO AUC (OSCR-AUC)
-    # TODO EER
-
-    return OpenSetIdentifMetrics(thrs=sorted_thrs,
-                                 TPIR_t=TPIR_t, FNIR_t=FNIR_t,
-                                 FRR_t=FRR_t,
-                                 TAR_t=TAR_t, FPIR_t=FPIR_t)
+    return _calc_OSI_metrics_from_counts(sorted_thrs=sorted_thrs,
+                                         N_queries_known=N_queries_known,
+                                         N_queries_unknown=N_queries_unknown,
+                                         unknown_accepted_counts=unknown_accepted_counts,
+                                         unknown_rejected_counts=unknown_rejected_counts,
+                                         known_accepted_correct_counts=known_accepted_correct_counts,
+                                         known_accepted_wrong_counts=known_accepted_wrong_counts,
+                                         known_rejected_counts=known_rejected_counts)
 
 
-def _calc_open_set_identif_metrics(full_ranking_labels: np.ndarray,
-                                   full_ranking_scores: np.ndarray,
-                                   query_labels: np.ndarray):
+def _calc_OSI_metrics(full_ranking_labels: np.ndarray,
+                      full_ranking_scores: np.ndarray,
+                      query_labels: np.ndarray):
     """
     Calculate open-set identification metrics.
 
@@ -420,8 +546,8 @@ def _calc_open_set_identif_metrics(full_ranking_labels: np.ndarray,
     full_ranking_scores_k = full_ranking_scores[known_mask].reshape(
         N_queries, -1)
 
-    return _calc_open_set_identif_metrics_masked(full_ranking_labels_k, full_ranking_scores_k,
-                                                 query_labels, unknown_query_mask)
+    return _calc_OSI_metrics_masked(full_ranking_labels_k, full_ranking_scores_k,
+                                    query_labels, unknown_query_mask)
 
 # ===================================================
 # CLOSED AND OPEN SET IDENTIFICATION MODEL EVALUATION
@@ -624,17 +750,17 @@ def test_identification(
     full_ranking_labels, full_ranking_scores = _get_full_ranking(
         proto_labels, proto_embeds, query_embeds)
 
-    closed_set_metrics = _calc_closed_set_identif_metrics(
+    csi_metrics = _calc_CSI_metrics(
         full_ranking_labels, query_labels)
 
-    open_set_metrics = _calc_open_set_identif_metrics(
+    osi_metrics = _calc_OSI_metrics(
         full_ranking_labels, full_ranking_scores, query_labels)
 
     eval_time = time.time() - start_time
 
-    return IdentifMetrics(closed_set_metrics=closed_set_metrics,
-                          open_set_metrics=open_set_metrics,
-                          eval_time=eval_time)
+    return IdnetificationMetrics(csi_metrics=csi_metrics,
+                                 osi_metrics=osi_metrics,
+                                 eval_time=eval_time)
 
 
 if __name__ == "__main__":
@@ -647,4 +773,4 @@ if __name__ == "__main__":
         0.81, 0.92, 0.97
     ])
 
-    _get_accepted_rejected_counts_per_thr(scores, sorted_thrs)
+    _get_OSI_acc_rej_counts_per_thr(scores, sorted_thrs)
