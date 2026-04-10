@@ -59,7 +59,7 @@ def plot_tsne(file_name: str, img_encoder: torch.nn.Module, dl: torch.utils.data
 
     # find all distinct class labels to plot each class with a different color
     distinct_labels = list(set(all_labels))
-    colors = plt.cm.get_cmap("hsv", len(distinct_labels))
+    colors = plt.colormaps["hsv"].resampled(len(distinct_labels))
 
     for index, label_id in enumerate(distinct_labels):
         # select only the 2D points belonging to the current label

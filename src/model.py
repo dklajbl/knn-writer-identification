@@ -316,6 +316,8 @@ class WriterIdentificationEncoder(nn.Module):
             torch.Tensor: Positional encoding matrix with shape [max_len, d_model].
         """
 
+        assert d_model % 2 == 0, f"d_model must be even for sinusoidal PE, got {d_model}"
+
         position = torch.arange(max_len).unsqueeze(1).float()  # [max_len, 1]
 
         div_term = torch.exp(

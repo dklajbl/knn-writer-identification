@@ -1,10 +1,11 @@
 from src.patchers.patcher_config import PatcherConfig
+from src.patchers.base_patcher import BasePatcher
 from src.patchers.grid_patcher import GridPatcher
 from src.patchers.random_patcher import RandomPatcher
 from src.patchers.sift_patcher import SIFTPatcher
 
 
-def make_patcher(config: PatcherConfig) -> GridPatcher:
+def make_patcher(config: PatcherConfig) -> BasePatcher:
 
     """
     Factory function that creates a patcher instance from configuration.

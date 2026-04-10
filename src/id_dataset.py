@@ -271,7 +271,7 @@ class IdDataset(torch.utils.data.Dataset):
 
             # add repeated samples from the same ID until target count is reached.
             for _ in range(new_count - old_count):
-                self.lines.append((cluster_id, np.random.choice(self.id_lines[cluster_id])))
+                self.lines.append((cluster_id, random.choice(self.id_lines[cluster_id])))
 
         logger.info(f"{self.file_name} -> p: {p}, max_count:{max_count}, uniformize data distribution to {len(self.lines)} lines",)
 
@@ -425,6 +425,11 @@ class IdDataset(torch.utils.data.Dataset):
         )
 
         images = [self._read_line(line_name) for line_name in lines]
+        images = [img for img in images if img is not None]
+
+        if not images:
+            return None
+
         images = np.stack(images, axis=0)
 
         return images
@@ -458,6 +463,11 @@ class IdDataset(torch.utils.data.Dataset):
 
         else:
             images = [self._read_line(line_name) for line_name in self.id_lines[idx]]
+            images = [img for img in images if img is not None]
+
+            if len(images) == 0:
+                raise ValueError(f"No images could be loaded for id: {idx}")
+
             images = np.stack(images, axis=0)
 
         return images
@@ -521,7 +531,7 @@ class IdDataset(torch.utils.data.Dataset):
             image = image[0]
 
         if self.aug is not None:
-            image = self.aug(images=[image])
+            image = self.aug(images=[image])[0]
 
         if self.transform:
             image = self.transform(image)
@@ -546,9 +556,19 @@ class IdDataset(torch.utils.data.Dataset):
         image_1 = self._read_line(self.lines[idx][1])
         line_cluster_id = self.lines[idx][0]
 
+        if image_1 is None:
+            raise RuntimeError(
+                f"Failed to load image '{self.lines[idx][1]}' (index {idx}) from LMDB '{self.lmdb_path}'."
+            )
+
         # pick another sample from the same class to create a positive pair.
         line_name = np.random.choice(self.id_lines[line_cluster_id])
         image_2 = self._read_line(line_name)
+
+        if image_2 is None:
+            raise RuntimeError(
+                f"Failed to load image '{line_name}' (positive pair for index {idx}) from LMDB '{self.lmdb_path}'."
+            )
 
         if self.page:
             # in page mode _read_line returns a list of windows
