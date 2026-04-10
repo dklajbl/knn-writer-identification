@@ -14,7 +14,7 @@ from torch.utils.data import DataLoader
 
 from pytorch_metric_learning import losses
 
-from src.encoders import Encoder
+from src.model import WriterIdentificationEncoder
 from src.id_dataset import IdDataset
 from src.tsne import plot_tsne
 
@@ -172,7 +172,16 @@ def create_model(args, device: torch.device) -> torch.nn.Module:
         torch.nn.Module: Initialized encoder model.
     """
 
-    image_encoder = Encoder(args.embed_dim).to(device)
+    image_encoder = WriterIdentificationEncoder(
+        in_channels=3,
+        hidden_dim=256,
+        embed_dim=args.embed_dim,
+        nhead=8,
+        num_transformer_layers=2,
+        dim_feedforward=1024,
+        dropout=0.1,
+        use_positional_encoding=(args.patcher == "grid"),
+    ).to(device)
 
     if args.start_iteration > 0:
         checkpoint_path = os.path.join(
@@ -637,7 +646,8 @@ def main() -> None:
 
     optimizer = torch.optim.AdamW(
         image_encoder.parameters(),
-        lr=args.learning_rate
+        lr=args.learning_rate,
+        weight_decay=args.weight_decay
     )
 
     loss_history = [0] * args.start_iteration
