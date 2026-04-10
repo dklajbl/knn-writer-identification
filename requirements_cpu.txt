@@ -5,7 +5,7 @@ torchvision==0.25.0
 --extra-index-url https://download.pytorch.org/whl/cpu
 
 numpy>=1.26,<1.27 # > 2.0 probably not supported yet, it was tested with 1.24-1.26
-opencv-python>=4.9,<5.0
+opencv-python-headless>=4.9,<5.0
 matplotlib>=3.8,<3.9
 scikit-learn>=1.4,<1.5
 
