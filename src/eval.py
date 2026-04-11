@@ -260,7 +260,7 @@ def _calc_CSI_metrics(full_ranking_labels: np.ndarray,
 class OSI_ThresholdDecisionStats:
     """ Per-threshold decision statistics for Open-Set Identification (OSI). """
 
-    sorted_thrs: np.ndarray
+    thrs_sorted: np.ndarray
 
     N_queries_known: int
     N_queries_unknown: int
@@ -275,34 +275,54 @@ class OSI_ThresholdDecisionStats:
             return False
 
         return (
-            np.array_equal(self.sorted_thrs, other.sorted_thrs) and
+            np.array_equal(self.thrs_sorted, other.thrs_sorted) and
             self.N_queries_known == other.N_queries_known and
             self.N_queries_unknown == other.N_queries_unknown and
             np.array_equal(self.unknown_accepted_counts, other.unknown_accepted_counts) and
             np.array_equal(self.unknown_rejected_counts, other.unknown_rejected_counts) and
             np.array_equal(self.known_accepted_correct_counts, other.known_accepted_correct_counts) and
             np.array_equal(self.known_accepted_wrong_counts, other.known_accepted_wrong_counts) and
-            np.array_equal(self.known_rejected_counts, other.known_rejected_counts)
+            np.array_equal(self.known_rejected_counts,
+                           other.known_rejected_counts)
         )
 
 
+def _is_asc(X):
+    return np.all(np.diff(X) >= 0)
+
+
+def _is_desc(X):
+    return np.all(np.diff(X) <= 0)
+
+
 def _calc_OSI_metrics_from_thr_decision_stats(thr_stats: OSI_ThresholdDecisionStats):
+
+    assert _is_asc(thr_stats.thrs_sorted)
+    assert _is_desc(thr_stats.known_accepted_correct_counts)
+    assert _is_desc(thr_stats.known_accepted_wrong_counts)
+    assert _is_asc(thr_stats.known_rejected_counts)
+    assert _is_desc(thr_stats.unknown_accepted_counts)
+    assert _is_asc(thr_stats.unknown_rejected_counts)
 
     # TPIR = True Positive Identification Rate.
     #   (== DIR = Detection and Identification Rate)
     # TPIR = (num. of KNOWN queries ACCEPTED and CORRECTLY IDENTIFIED)
     #           / (total num. of KNOWN queries).
+    # Descending. THR increases -> TPIR decreases.
     # Shape: (N_thresholds).
     TPIR_t = thr_stats.known_accepted_correct_counts / thr_stats.N_queries_known
 
     # FNIR = False Negative Identification Rate.
     # FNIR = (num. of KNOWN queries REJECTED or (ACCEPTED and INCORRECTLY IDENTIFIED))
     #           / (total num. of KNOWN queries)
+    # Ascending. THR increases -> FNIR increases.
+    # Shape: (N_thresholds).
     FNIR_t = 1 - TPIR_t
 
     # FPIR = False Positive Identification Rate per threshold.
     #   (== FAR = False Accept Rate)
     # FPIR = (num. of UNKNOWN queries ACCEPTED) / (total num. of UNKNOWN queries)
+    # Descending. THR increases -> FPIR decreases.
     # Shape: (N_thresholds).
     FPIR_t = thr_stats.unknown_accepted_counts / thr_stats.N_queries_unknown
 
@@ -311,28 +331,32 @@ def _calc_OSI_metrics_from_thr_decision_stats(thr_stats: OSI_ThresholdDecisionSt
 
     # FNR = False Negative Rate (Known Rejection Rate)
     # FNR = (num. of KNOWN queries REJECTED) / (total num. of KNOWN queries)
+    # Ascending. THR increases -> FNR increases.
     FNR_t = thr_stats.known_rejected_counts / thr_stats.N_queries_known
 
     # TPR = True Positive Rate (Known Acceptance Rate)
     # TPR = (num. of KNOWN queries ACCEPTED) / (total num. of KNOWN queries)
+    # Descending. THR increases -> TPR decreases.
     TPR_t = 1 - FNR_t
 
-    # OSCR: TPIR x FPIR
+    # OSCR: x=FPIR vs y=TPIR
 
-    # have to guarantee, that X value for inteprolation are stricly monotonously ascending
-    _, fpir_unique_idx = np.unique(FPIR_t, return_index=True)
-    fpir_order = fpir_unique_idx[np.argsort(FPIR_t[fpir_unique_idx])]
+    #   Thrs are ascending, FPIR_t is descending, TPIR_t is descending
+    #   ---> but OSCR requires -->
+    #   FPIR_t is ascending, TPIR_t is ascending -> Thrs must be descending
 
-    fpir_t_sorted = FPIR_t[fpir_order]
-    tpir_t_sorted_by_fpir = TPIR_t[fpir_order]
-    thrs_sorted_by_fpir = thr_stats.thrs_sorted[fpir_order]
+    fpir_ascending = FPIR_t[::-1]
+    tpir_ascending = TPIR_t[::-1]
+    thrs_descending = thr_stats.thrs_sorted[::-1]
 
-    oscr_x_fpir = np.logspace(-4, 0, num=200)  # 0.0001=1e-4 -> 1
+    oscr_x_fpir = np.linspace(0.0, 1.0, 500)
     oscr_y_tpir = np.interp(
-        oscr_x_fpir, fpir_t_sorted, tpir_t_sorted_by_fpir)
+        oscr_x_fpir, fpir_ascending, tpir_ascending,
+        left=0, right=tpir_ascending[-1])
     oscr_y_thr = np.interp(
-        oscr_x_fpir, fpir_t_sorted, thrs_sorted_by_fpir)
-    oscr_auc = np.trapz(tpir_t_sorted_by_fpir, fpir_t_sorted)
+        oscr_x_fpir, fpir_ascending, thrs_descending,
+        left=thrs_descending[0], right=thrs_descending[-1])
+    oscr_auc = np.trapz(tpir_ascending, fpir_ascending)
 
     oscr_curve = OSI_OSCR_Curve(x_fpir=oscr_x_fpir,
                                 y_tpir=oscr_y_tpir,
@@ -345,38 +369,55 @@ def _calc_OSI_metrics_from_thr_decision_stats(thr_stats: OSI_ThresholdDecisionSt
         fpir: {
             OSI_FPIR_OpPoint(
                 fpir=fpir,
-                tpir=np.interp(fpir, fpir_t_sorted, tpir_t_sorted_by_fpir),
-                thr=np.interp(fpir, fpir_t_sorted, thrs_sorted_by_fpir)
+                tpir=np.interp(fpir, fpir_ascending, tpir_ascending,
+                               left=0, right=tpir_ascending[-1]),
+                thr=np.interp(fpir, fpir_ascending, thrs_descending,
+                              left=thrs_descending[0], right=thrs_descending[-1])
             )
         }
         for fpir in fpir_targets
     }
 
-    # ROC: TPR x FPR(FPIR)
-    tpr_sorted_by_fpir = TPR_t[fpir_order]
+    # ROC: x=FPR(FPIR) vs y=TPR/Thresholds
 
-    roc_x_fpr = np.logspace(-4, 0, num=200)
-    roc_y_tpr = np.interp(roc_x_fpr, fpir_t_sorted, tpr_sorted_by_fpir)
-    roc_y_thr = np.interp(roc_x_fpr, fpir_t_sorted, thrs_sorted_by_fpir)
-    roc_auc = np.trapz(tpr_sorted_by_fpir, fpir_t_sorted)
+    #   Thrs are ascending, FPR_t is descending, TPR_t is descending
+    #   ---> but ROC requires -->
+    #   FPR_t is ascending, TPR_t is ascending -> Thrs must be descending
+
+    fpr_ascending = FPIR_t[::-1]
+    tpr_ascending = TPR_t[::-1]
+    thrs_descending = thr_stats.thrs_sorted[::-1]
+
+    roc_x_fpr = np.linspace(0.0, 1.0, 500)
+    roc_y_tpr = np.interp(roc_x_fpr, fpr_ascending, tpr_ascending,
+                          left=0.0, right=1.0)
+    roc_y_thr = np.interp(roc_x_fpr, fpr_ascending, thrs_descending,
+                          left=thrs_descending[0], right=thrs_descending[-1])
+    roc_auc = np.trapz(tpr_ascending, fpr_ascending)
 
     roc_curve = OSI_ROC_Curve(x_fpr=roc_x_fpr,
                               y_tpr=roc_y_tpr,
                               y_thr=roc_y_thr,
                               auc=roc_auc)
 
-    # DET: FNR(FNIR) vs FPR
-    _, fpr_unique_idx = np.unique(FPR_t, return_index=True)
-    fpr_order = fpr_unique_idx[np.argsort(FPR_t[fpr_unique_idx])]
+    # DET: x=FPR vs y=FNR(FNIR)
 
-    fpr_t_sorted = FPR_t[fpr_order]
-    fnr_t_sorted_by_fpr = FNR_t[fpr_order]
-    thrs_sorted_by_fpr = thr_stats.thrs_sorted[fpr_order]
+    #   Thrs are ascending, FPR_t is descending, FNR_t is ascending
+    #   ---> but DET requires -->
+    #   FPR_t is ascending, TPR_t is descending -> Thrs must be descending
 
-    det_x_fpr = np.logspace(-4, 0, num=200)
-    det_y_fnr = np.interp(det_x_fpr, fpr_t_sorted, fnr_t_sorted_by_fpr)
-    det_y_thr = np.interp(det_x_fpr, fpr_t_sorted, thrs_sorted_by_fpr)
-    det_auc = np.trapz(fnr_t_sorted_by_fpr, fpr_t_sorted)
+    fpr_ascending = FPR_t[::-1]
+    fnr_descending = FNR_t[::-1]
+    thrs_descending = thr_stats.thrs_sorted[::-1]
+
+    det_x_fpr = np.linspace(0.0, 1.0, 500)
+    det_y_fnr = np.interp(det_x_fpr, fpr_ascending, fnr_descending,
+                          left=fnr_descending[0],
+                          right=fnr_descending[-1])
+    det_y_thr = np.interp(det_x_fpr, fpr_ascending, thrs_descending,
+                          left=thrs_descending[0],
+                          right=thrs_descending[-1])
+    det_auc = np.trapz(fnr_descending, fpr_ascending)
 
     det_curve = OSI_DET_Curve(x_fpr=det_x_fpr,
                               y_fnr=det_y_fnr,
@@ -398,7 +439,7 @@ def _calc_OSI_metrics_from_thr_decision_stats(thr_stats: OSI_ThresholdDecisionSt
 
 
 def _get_OSI_acc_rej_counts_per_thr(query_scores: np.ndarray,
-                                    sorted_thrs: np.ndarray):
+                                    thrs_sorted: np.ndarray):
     """
     Calculate counts of accepted and rejected queries for each threshold.
     Query is accepted if its score is larger or equal to given threshold.
@@ -407,7 +448,7 @@ def _get_OSI_acc_rej_counts_per_thr(query_scores: np.ndarray,
         query_scores (np.ndarray, shape=(N_queries, N_labels), dtype=np.float32):
             Score for each query.
 
-        sorted_thrs (np.ndarray, shape=(N_thresholds), dtype=np.float32):
+        thrs_sorted (np.ndarray, shape=(N_thresholds), dtype=np.float32):
             Sorted thresholds in ascending order.
 
     Returns:
@@ -430,7 +471,7 @@ def _get_OSI_acc_rej_counts_per_thr(query_scores: np.ndarray,
     # this index equals the number of scores strictly less than the threshold
     # score_idx[j] = number of scores < threshold[j]
     # (N_thresholds)
-    score_idx = np.searchsorted(query_scores_sorted, sorted_thrs, side="left")
+    score_idx = np.searchsorted(query_scores_sorted, thrs_sorted, side="left")
 
     rejected_counts = score_idx
     accepted_counts = N_queries - rejected_counts
@@ -474,7 +515,12 @@ def _calc_OSI_thr_decision_stats(top1_labels: np.ndarray,
     # generate thresholds
     # (N_thresholds)
     unique_scores = np.unique(top1_scores)
-    sorted_thrs = np.union1d(unique_scores, [-1.0, 1.0])
+
+    # add 2 new threshold: one smaller and the other larger than all of the scores
+    eps = 1e-6
+    min_score = np.min(unique_scores)
+    max_score = np.max(unique_scores)
+    thrs_sorted = np.union1d(unique_scores, [min_score - eps, max_score + eps])
 
     # STEP 3: Compute query count statistics (rejected, accepted, ...) for each possible threshold
 
@@ -483,7 +529,7 @@ def _calc_OSI_thr_decision_stats(top1_labels: np.ndarray,
     unknown_query_scores = top1_scores[unknown_query_mask]
 
     unknown_accepted_counts, unknown_rejected_counts = _get_OSI_acc_rej_counts_per_thr(
-        unknown_query_scores, sorted_thrs)
+        unknown_query_scores, thrs_sorted)
 
     # known sample count statistics
 
@@ -491,18 +537,18 @@ def _calc_OSI_thr_decision_stats(top1_labels: np.ndarray,
     known_query_scores = top1_scores[known_query_mask]
 
     known_accepted_counts, known_rejected_counts = _get_OSI_acc_rej_counts_per_thr(
-        known_query_scores, sorted_thrs)
+        known_query_scores, thrs_sorted)
 
     correct_query_mask = (top1_labels == query_labels)
     known_correct_query_mask = correct_query_mask & known_query_mask
     known_correct_query_scores = top1_scores[known_correct_query_mask]
 
     known_accepted_correct_counts, _ = _get_OSI_acc_rej_counts_per_thr(
-        known_correct_query_scores, sorted_thrs)
+        known_correct_query_scores, thrs_sorted)
 
     known_accepted_wrong_counts = known_accepted_counts - known_accepted_correct_counts
 
-    return OSI_ThresholdDecisionStats(sorted_thrs=sorted_thrs,
+    return OSI_ThresholdDecisionStats(thrs_sorted=thrs_sorted,
                                       N_queries_known=N_queries_known,
                                       N_queries_unknown=N_queries_unknown,
                                       unknown_accepted_counts=unknown_accepted_counts,
@@ -703,6 +749,8 @@ def _get_prototypes(gallery_images: np.ndarray,
         else:
             end = len(proto_labels)
         proto_embeds.append(gallery_embeds[start:end].mean(axis=0))
+
+        # get first image as prototype image
         proto_images.append(gallery_images[start])
 
     # (N_labels, Embed_size)
@@ -727,7 +775,7 @@ def _get_full_ranking(proto_labels: np.ndarray,
     full_ranking_scores = []
 
     # iterate over batches of queries
-    query_batch_size = 1024
+    query_batch_size = 512
     for i in range(0, len(query_embeds), query_batch_size):
 
         # (query_batch_size, emb_size)
