@@ -7,64 +7,74 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True)
 class OSI_OSCR_Curve:
-    # OSCR: TPIR x FPIR
+    """ OSCR: TPIR x FPIR """
+
     x_fpir: np.ndarray
-    x_fpir_std: np.ndarray | None = None
     y_tpir: np.ndarray
-    y_tpir_std: np.ndarray | None = None
     y_thr: np.ndarray
-    y_thr_std: np.ndarray | None = None
     auc: np.float32
+
+    x_fpir_std: np.ndarray | None = None
+    y_tpir_std: np.ndarray | None = None
+    y_thr_std: np.ndarray | None = None
     auc_std: np.float32 | None = None
 
 
 @dataclass(frozen=True)
 class OSI_ROC_Curve:
-    # ROC: TPR x FPR(FPIR)
+    """ ROC: TPR x FPR(FPIR) """
+
     x_fpr: np.ndarray
-    x_fpr_std: np.ndarray | None = None
     y_tpr: np.ndarray
-    y_tpr_std: np.ndarray | None = None
     y_thr: np.ndarray
-    y_thr_std: np.ndarray | None = None
     auc: np.float32
+
+    x_fpr_std: np.ndarray | None = None
+    y_tpr_std: np.ndarray | None = None
+    y_thr_std: np.ndarray | None = None
     auc_std: np.float32 | None = None
 
 
 @dataclass(frozen=True)
 class OSI_DET_Curve:
-    # DET: FNR(FNIR) vs FPR
+    """ DET: FNR(FNIR) x FPR """
+
     x_fpr: np.ndarray
-    x_fpr_std: np.ndarray | None = None
     y_fnr: np.ndarray
-    y_fnr_std: np.ndarray | None = None
     y_thr: np.ndarray
-    y_thr_std: np.ndarray | None = None
     auc: np.float32
+
+    x_fpr_std: np.ndarray | None = None
+    y_fnr_std: np.ndarray | None = None
+    y_thr_std: np.ndarray | None = None
     auc_std: np.float32 | None = None
 
 
 @dataclass(frozen=True)
 class OSI_FPIR_OpPoint:
-    # TPIR and Threshold at specific FPIR operating points
+    """ TPIR and Threshold at specific FPIR operating points """
+
     fpir: np.float32
-    fpir_std: np.float32 | None = None
     tpir: np.float32
-    tpir_std: np.float32 | None = None
     thr: np.float32
+
+    fpir_std: np.float32 | None = None
+    tpir_std: np.float32 | None = None
     thr_std: np.float32 | None = None
 
 
 @dataclass(frozen=True)
 class OSI_EER:
-    # EER = Equal Error Rate
-    # Point on DET curve, where FPIR ≈ FNIR
-    val: np.float32
-    val_std: np.float32 | None = None
+    """
+    EER = Equal Error Rate
 
-    # EER_thr = Equal Error Rate Threshold
-    # Threshold, where FPIR ≈ FNIR
+    Point on DET curve, where FPIR ≈ FNIR
+    """
+
+    val: np.float32
     thr: np.float32
+
+    val_std: np.float32 | None = None
     thr_std: np.float32 | None = None
 
 
@@ -140,7 +150,7 @@ def _calc_CSI_cmc(full_ranking_labels: np.ndarray,
         full_ranking_labels (np.ndarray, shape=(N_queries, N_labels), dtype=int):
             All ranked predicted labels for each query.
 
-        query_labels (np.ndarray, shape=(N_labels), dtype=int):
+        query_labels (np.ndarray, shape=(N_queries,), dtype=int):
             Query labels (ground truth).
 
     Returns:
@@ -153,12 +163,19 @@ def _calc_CSI_cmc(full_ranking_labels: np.ndarray,
     # (N_queries, N_labels)
     matches = (full_ranking_labels == query_labels[:, None])
 
+    # check if each query has match in label ranking
+    # (N_queries)
+    has_match = matches.any(axis=1)
+
     # find index of (first and only) label match
     # (N_queries)
     first_correct_idx = np.argmax(matches, axis=1)
 
-    n_labels = len(full_ranking_labels)
-    cmc_curve = np.zeros(n_labels)
+    # if there was no match replace the index with infinity
+    first_correct_idx = np.where(has_match, first_correct_idx, np.inf)
+
+    n_labels = full_ranking_labels.shape[1]
+    cmc_curve = np.zeros(n_labels, dtype=np.float32)
 
     for k in range(n_labels):
         # check if first correct label was within rank k for each query
@@ -177,7 +194,7 @@ def _calc_CSI_mrr(full_ranking_labels: np.ndarray,
         full_ranking_labels (np.ndarray, shape=(N_queries, N_labels), dtype=int):
             All ranked predicted labels for each query.
 
-        query_labels (np.ndarray, shape=(N_labels), dtype=int):
+        query_labels (np.ndarray, shape=(N_queries,), dtype=int):
             Query labels (ground truth).
 
     Returns:
@@ -190,12 +207,18 @@ def _calc_CSI_mrr(full_ranking_labels: np.ndarray,
     # (N_queries, N_labels) = (N_queries, N_labels) == (N_queries, 1)
     matches = (full_ranking_labels == query_labels[:, None])
 
+    # check if each query has match in label ranking
+    # (N_queries)
+    has_match = matches.any(axis=1)
+
     # find index of (first and only) label match
     # (N_queries)
     first_correct_idx = np.argmax(matches, axis=1)
 
     # calculate mean of (1 / (first correct label index + 1))
-    mrr = np.mean(1 / (first_correct_idx + 1))
+    rr = np.zeros(matches.shape[0], dtype=np.float32)
+    rr[has_match] = 1.0 / (first_correct_idx[has_match] + 1)
+    mrr = rr.mean()
 
     return mrr
 
@@ -220,10 +243,10 @@ def _calc_CSI_metrics(full_ranking_labels: np.ndarray,
     cmc = _calc_CSI_cmc(full_ranking_labels, query_labels)
     mrr = _calc_CSI_mrr(full_ranking_labels, query_labels)
 
-    rank_1_acc = cmc[min(0, len(cmc)-1)]
-    rank_3_acc = cmc[min(2, len(cmc)-1)]
-    rank_5_acc = cmc[min(4, len(cmc)-1)]
-    rank_10_acc = cmc[min(9, len(cmc)-1)]
+    rank_1_acc = cmc[0] if len(cmc) > 0 else 0.0
+    rank_3_acc = cmc[min(2, len(cmc)-1)] if len(cmc) > 0 else 0.0
+    rank_5_acc = cmc[min(4, len(cmc)-1)] if len(cmc) > 0 else 0.0
+    rank_10_acc = cmc[min(9, len(cmc)-1)] if len(cmc) > 0 else 0.0
 
     return CSI_Metrics(CMC=cmc, MRR=mrr,
                        rank_1_acc=rank_1_acc, rank_3_acc=rank_3_acc,
@@ -233,22 +256,44 @@ def _calc_CSI_metrics(full_ranking_labels: np.ndarray,
 # OPEN SET IDENTIFICATION MODEL EVALUATION
 
 
-def _calc_OSI_metrics_from_counts(
-        thrs_sorted: np.ndarray,
-        N_queries_known: int,
-        N_queries_unknown: int,
-        unknown_accepted_counts: np.ndarray,
-        unknown_rejected_counts: np.ndarray,
-        known_accepted_correct_counts: np.ndarray,
-        known_accepted_wrong_counts: np.ndarray,
-        known_rejected_counts: np.ndarray):
+@dataclass(frozen=True)
+class OSI_ThresholdDecisionStats:
+    """ Per-threshold decision statistics for Open-Set Identification (OSI). """
+
+    sorted_thrs: np.ndarray
+
+    N_queries_known: int
+    N_queries_unknown: int
+    unknown_accepted_counts: np.ndarray
+    unknown_rejected_counts: np.ndarray
+    known_accepted_correct_counts: np.ndarray
+    known_accepted_wrong_counts: np.ndarray
+    known_rejected_counts: np.ndarray
+
+    def __eq__(self, other):
+        if not isinstance(other, OSI_ThresholdDecisionStats):
+            return False
+
+        return (
+            np.array_equal(self.sorted_thrs, other.sorted_thrs) and
+            self.N_queries_known == other.N_queries_known and
+            self.N_queries_unknown == other.N_queries_unknown and
+            np.array_equal(self.unknown_accepted_counts, other.unknown_accepted_counts) and
+            np.array_equal(self.unknown_rejected_counts, other.unknown_rejected_counts) and
+            np.array_equal(self.known_accepted_correct_counts, other.known_accepted_correct_counts) and
+            np.array_equal(self.known_accepted_wrong_counts, other.known_accepted_wrong_counts) and
+            np.array_equal(self.known_rejected_counts, other.known_rejected_counts)
+        )
+
+
+def _calc_OSI_metrics_from_thr_decision_stats(thr_stats: OSI_ThresholdDecisionStats):
 
     # TPIR = True Positive Identification Rate.
     #   (== DIR = Detection and Identification Rate)
     # TPIR = (num. of KNOWN queries ACCEPTED and CORRECTLY IDENTIFIED)
     #           / (total num. of KNOWN queries).
     # Shape: (N_thresholds).
-    TPIR_t = known_accepted_correct_counts / N_queries_known
+    TPIR_t = thr_stats.known_accepted_correct_counts / thr_stats.N_queries_known
 
     # FNIR = False Negative Identification Rate.
     # FNIR = (num. of KNOWN queries REJECTED or (ACCEPTED and INCORRECTLY IDENTIFIED))
@@ -259,14 +304,14 @@ def _calc_OSI_metrics_from_counts(
     #   (== FAR = False Accept Rate)
     # FPIR = (num. of UNKNOWN queries ACCEPTED) / (total num. of UNKNOWN queries)
     # Shape: (N_thresholds).
-    FPIR_t = unknown_accepted_counts / N_queries_unknown
+    FPIR_t = thr_stats.unknown_accepted_counts / thr_stats.N_queries_unknown
 
     # FPR = False Positive Rate = FPIR
     FPR_t = FPIR_t
 
     # FNR = False Negative Rate (Known Rejection Rate)
     # FNR = (num. of KNOWN queries REJECTED) / (total num. of KNOWN queries)
-    FNR_t = known_rejected_counts / N_queries_known
+    FNR_t = thr_stats.known_rejected_counts / thr_stats.N_queries_known
 
     # TPR = True Positive Rate (Known Acceptance Rate)
     # TPR = (num. of KNOWN queries ACCEPTED) / (total num. of KNOWN queries)
@@ -280,7 +325,7 @@ def _calc_OSI_metrics_from_counts(
 
     fpir_t_sorted = FPIR_t[fpir_order]
     tpir_t_sorted_by_fpir = TPIR_t[fpir_order]
-    thrs_sorted_by_fpir = thrs_sorted[fpir_order]
+    thrs_sorted_by_fpir = thr_stats.thrs_sorted[fpir_order]
 
     oscr_x_fpir = np.logspace(-4, 0, num=200)  # 0.0001=1e-4 -> 1
     oscr_y_tpir = np.interp(
@@ -326,7 +371,7 @@ def _calc_OSI_metrics_from_counts(
 
     fpr_t_sorted = FPR_t[fpr_order]
     fnr_t_sorted_by_fpr = FNR_t[fpr_order]
-    thrs_sorted_by_fpr = thrs_sorted[fpr_order]
+    thrs_sorted_by_fpr = thr_stats.thrs_sorted[fpr_order]
 
     det_x_fpr = np.logspace(-4, 0, num=200)
     det_y_fnr = np.interp(det_x_fpr, fpr_t_sorted, fnr_t_sorted_by_fpr)
@@ -341,7 +386,7 @@ def _calc_OSI_metrics_from_counts(
     # Equal Error Rate: FPIR ≈ FNIR
     eer_idx = np.argmin(np.abs(FPIR_t - FNIR_t))
     eer_val = (FPIR_t[eer_idx] + FNIR_t[eer_idx]) / 2
-    eer_thr = thrs_sorted[eer_idx]
+    eer_thr = thr_stats.thrs_sorted[eer_idx]
 
     eer = OSI_EER(val=eer_val, thr=eer_thr)
 
@@ -356,7 +401,7 @@ def _get_OSI_acc_rej_counts_per_thr(query_scores: np.ndarray,
                                     sorted_thrs: np.ndarray):
     """
     Calculate counts of accepted and rejected queries for each threshold.
-    Query is accepted if its score is strictly larger than the threshold.
+    Query is accepted if its score is larger or equal to given threshold.
 
     Parameters:
         query_scores (np.ndarray, shape=(N_queries, N_labels), dtype=np.float32):
@@ -376,43 +421,36 @@ def _get_OSI_acc_rej_counts_per_thr(query_scores: np.ndarray,
 
     N_queries = len(query_scores)
 
-    # for each query score compute the index of the first threshold
-    #   that is strictly larger than the query score
-    #   == number of thresholds smaller or equal to the query score
-    # if there is no such threshold, than the index == N_thresholds
+    # sort query scores
     # (N_queries)
-    thr_idxs = np.searchsorted(sorted_thrs, scores)
+    query_scores_sorted = np.sort(query_scores)
 
-    # for each threshold compute for how many query scores
-    #   is the threshold the first strictly larger threshold
-    # the last index (= N_thresholds) is the count of queries
-    #   with score larger or equal to the largest threshold
-    # (N_thresholds+1)
-    counts = np.bincount(thr_idxs, minlength=len(sorted_thrs) + 1)[:-1]
+    # for each threshold, compute the insertion index
+    #   in the sorted query scores array
+    # this index equals the number of scores strictly less than the threshold
+    # score_idx[j] = number of scores < threshold[j]
+    # (N_thresholds)
+    score_idx = np.searchsorted(query_scores_sorted, sorted_thrs, side="left")
 
-    # compute number of accepted queries for each threshold
-    # query is accepted if its score is larger or equal to given threshold
-    rejected_counts = counts.cumsum()
+    rejected_counts = score_idx
     accepted_counts = N_queries - rejected_counts
 
     return accepted_counts, rejected_counts
 
 
-def _calc_OSI_metrics_masked(full_ranking_labels_k: np.ndarray,
-                             full_ranking_scores_k: np.ndarray,
-                             query_labels: np.ndarray,
-                             unknown_query_mask: np.ndarray):
+def _calc_OSI_thr_decision_stats(top1_labels: np.ndarray,
+                                 top1_scores: np.ndarray,
+                                 query_labels: np.ndarray,
+                                 unknown_query_mask: np.ndarray):
     """
-    Calculate open-set identification metrics with masked unknown queries
-        (query label does not exist in gallery).
-    Helper function called by `_calc_open_set_identif_metrics`.
+    Calculate per-threshold decision statistics.
 
     Parameters:
-        full_ranking_labels_k (np.ndarray, shape=(N_queries, N_labels), dtype=int):
-            All ranked predicted labels for each query excluding unknown labels.
+        top1_labels (np.ndarray, shape=(N_queries,), dtype=int):
+            Top 1 predicted label for each query. (Excludes unknown labels).
 
-        full_ranking_scores_k (np.ndarray. shape=(N_queries, N_labels), dtype=np.float32):
-            Scores of all ranked predicted labels for each query excluding unknown labels.
+        top1_scores (np.ndarray. shape=(N_queries,), dtype=np.float32):
+            Scores of the top 1 predicted labels.
 
         query_labels (np.ndarray, shape=(N_labels), dtype=int): Query labels (ground truth).
 
@@ -420,8 +458,8 @@ def _calc_OSI_metrics_masked(full_ranking_labels_k: np.ndarray,
             Boolean mask over queries. True if the query label is unknown.
 
     Returns:
-        open_set_identif_metrics (OpenSetIdentifMetrics):
-            Dataclass containing calculated open-set identification metrics.
+        OSI_ThresholdDecisionStats:
+            Dataclass containing per-threshold decision statistics.
     """
 
     # STEP 1: Preparation
@@ -430,11 +468,6 @@ def _calc_OSI_metrics_masked(full_ranking_labels_k: np.ndarray,
     N_queries = len(query_labels)
     N_queries_unknown = np.sum(unknown_query_mask)
     N_queries_known = N_queries - N_queries_unknown
-
-    # get best labels and their scores
-    # (N_queries)
-    top1_labels = full_ranking_labels_k[:, 0]
-    top1_scores = full_ranking_scores_k[:, 0]
 
     # STEP 2: Get thresholds == all uniques scores in sorted order
 
@@ -469,16 +502,14 @@ def _calc_OSI_metrics_masked(full_ranking_labels_k: np.ndarray,
 
     known_accepted_wrong_counts = known_accepted_counts - known_accepted_correct_counts
 
-    # STEP 4: Calcualte (per threshold) metrics
-
-    return _calc_OSI_metrics_from_counts(sorted_thrs=sorted_thrs,
-                                         N_queries_known=N_queries_known,
-                                         N_queries_unknown=N_queries_unknown,
-                                         unknown_accepted_counts=unknown_accepted_counts,
-                                         unknown_rejected_counts=unknown_rejected_counts,
-                                         known_accepted_correct_counts=known_accepted_correct_counts,
-                                         known_accepted_wrong_counts=known_accepted_wrong_counts,
-                                         known_rejected_counts=known_rejected_counts)
+    return OSI_ThresholdDecisionStats(sorted_thrs=sorted_thrs,
+                                      N_queries_known=N_queries_known,
+                                      N_queries_unknown=N_queries_unknown,
+                                      unknown_accepted_counts=unknown_accepted_counts,
+                                      unknown_rejected_counts=unknown_rejected_counts,
+                                      known_accepted_correct_counts=known_accepted_correct_counts,
+                                      known_accepted_wrong_counts=known_accepted_wrong_counts,
+                                      known_rejected_counts=known_rejected_counts)
 
 
 def _calc_OSI_metrics(full_ranking_labels: np.ndarray,
@@ -546,8 +577,19 @@ def _calc_OSI_metrics(full_ranking_labels: np.ndarray,
     full_ranking_scores_k = full_ranking_scores[known_mask].reshape(
         N_queries, -1)
 
-    return _calc_OSI_metrics_masked(full_ranking_labels_k, full_ranking_scores_k,
-                                    query_labels, unknown_query_mask)
+    # get top 1 predicted labels and their scores
+    # (N_queries)
+    top1_labels = full_ranking_labels_k[:, 0]
+    top1_scores = full_ranking_scores_k[:, 0]
+
+    # STEP 4: Calculate per threshold decision query count statistics
+    thr_stats = _calc_OSI_thr_decision_stats(top1_labels, top1_scores,
+                                             query_labels, unknown_query_mask)
+
+    # STEP 5: Calculate metrics from the per threshold decision query count statistics
+    osi_metrics = _calc_OSI_metrics_from_thr_decision_stats(thr_stats)
+
+    return osi_metrics
 
 # ===================================================
 # CLOSED AND OPEN SET IDENTIFICATION MODEL EVALUATION
@@ -761,16 +803,3 @@ def test_identification(
     return IdnetificationMetrics(csi_metrics=csi_metrics,
                                  osi_metrics=osi_metrics,
                                  eval_time=eval_time)
-
-
-if __name__ == "__main__":
-    sorted_thrs = np.array([0.2, 0.4, 0.6, 0.8])
-    scores = np.array([
-        0.05,
-        0.21, 0.4,
-        0.41, 0.45, 0.55,
-        0.62, 0.77, 0.78, 0.79,
-        0.81, 0.92, 0.97
-    ])
-
-    _get_OSI_acc_rej_counts_per_thr(scores, sorted_thrs)
