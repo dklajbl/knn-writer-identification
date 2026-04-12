@@ -72,14 +72,6 @@ def parse_args() -> argparse.Namespace:
         help="Patch width in pixels used by all patchers."
     )
 
-    parser.add_argument(
-        "--min-partial-ratio",
-        type=float,
-        default=0.3,
-        help="Minimum fraction of patch dimension for edge remainders to be kept (grid patcher only). "
-             "Strips thinner than this ratio are skipped to avoid interpolation artifacts."
-    )
-
     parser.add_argument("--width", type=int, default=320)
 
     parser.add_argument("--start-iteration", default=0, type=int)
@@ -221,7 +213,7 @@ def create_dataloaders(args) -> tuple[DataLoader, DataLoader | None]:
         random_seed=NP_RANDOM_SEED,
         patch_height=args.patch_height,
         patch_width=args.patch_width,
-        min_partial_ratio=args.min_partial_ratio,
+        min_partial_ratio=0.3,
     )
 
     # grid patcher produces variable patch counts per image, so a custom collate pads to the max count and creates masks
