@@ -102,23 +102,26 @@ class CSI_Metrics:
     # Accuracy for rank K =
     #   (Num. of queries with correct label within top K predicted labels) / (Total num. of queries).
     # Shape: (N_labels).
-    CMC: np.ndarray
+    cmc: np.ndarray
 
     # Mean Reciprocal Rank.
     # Average of (1 / rank of correct label) for each query.
-    MRR: np.float32
+    mrr: np.float32
 
-    # Rank 1 accuracy.
-    rank_1_acc: np.float32
+    def rank_k_acc(self, k: int) -> np.float32:
+        """ Get rank k accuracy. """
+        if k < 1:
+            raise ValueError(f"Rank k must be >= 1, got {k}")
 
-    # Rank 3 accuracy.
-    rank_3_acc: np.float32
+        if len(self.cmc) == 0:
+            raise ValueError("CMC is empty")
 
-    # Rank 5 accuracy.
-    rank_5_acc: np.float32
+        if k > len(self.cmc):
+            raise ValueError(f"Rank k={k} exceeds max rank={len(self.cmc)}")
 
-    # Rank 10 accuracy.
-    rank_10_acc: np.float32
+        rank_k_acc = self.cmc[k - 1]
+
+        return rank_k_acc
 
 
 @dataclass
@@ -243,14 +246,7 @@ def _calc_CSI_metrics(full_ranking_labels: np.ndarray,
     cmc = _calc_CSI_cmc(full_ranking_labels, query_labels)
     mrr = _calc_CSI_mrr(full_ranking_labels, query_labels)
 
-    rank_1_acc = cmc[0] if len(cmc) > 0 else 0.0
-    rank_3_acc = cmc[min(2, len(cmc)-1)] if len(cmc) > 0 else 0.0
-    rank_5_acc = cmc[min(4, len(cmc)-1)] if len(cmc) > 0 else 0.0
-    rank_10_acc = cmc[min(9, len(cmc)-1)] if len(cmc) > 0 else 0.0
-
-    return CSI_Metrics(CMC=cmc, MRR=mrr,
-                       rank_1_acc=rank_1_acc, rank_3_acc=rank_3_acc,
-                       rank_5_acc=rank_5_acc, rank_10_acc=rank_10_acc)
+    return CSI_Metrics(cmc=cmc, mrr=mrr)
 
 # ========================================
 # OPEN SET IDENTIFICATION MODEL EVALUATION
@@ -655,31 +651,31 @@ def _get_all_from_dataloader(encoder: torch.nn.Module,
         device (torch.device): Device used to run the model inference.
 
     Returns:
-        Tuple[np.ndarray, np.ndarray, np.ndarray]:
-            all_images (np.ndarray, shape=(N_samples, H, W, C), dtype=np.float32): Array of loaded images.
-
+        Tuple[np.ndarray, np.ndarray]:
             all_labels (np.ndarray, shape=(N_samples,), dtype=int): Array of labels.
 
             all_embeds (np.ndarray, shape=(N_samples, Embed_size), dtype=np.float32): Array of embeddings.
     """
 
     all_embeds = []
-    all_images = []
+    # all_images = []
     all_labels = []
 
     with torch.no_grad():
         # TODO: Need to modify to work with newest dataloader implementation
 
-        for images_1, images_2, labels in dataloader:
-            # ignore second image
+        # (B, P, C, H, W), (B, P, C, H, W), (B,)
+        for samples_1, samples_2, labels in dataloader:
+            # ignore second samples
 
-            images_1 = images_1.to(device)
-            embeds = encoder(images_1)
+            # (B, P, C, H, W)
+            samples_1 = samples_1.to(device)
+            embeds = encoder(samples_1)
 
-            # (B, C, H, W) -> (B, H, W, C)
-            # multiplying by 255 to scale values from [0, 1] to [0, 255]
-            images_np = images_1.permute(
-                0, 2, 3, 1).cpu().numpy().astype(np.float32) * 255.0
+            # # (B, P, C, H, W) -> (B, P, H, W, C)
+            # # multiplying by 255 to scale values from [0, 1] to [0, 255]
+            # images_np = images_1.permute(
+            #     0, 1, 3, 4, 2).cpu().numpy().astype(np.float32) * 255.0
 
             # (B)
             labels_np = labels.cpu().numpy().astype(np.float32)
@@ -687,37 +683,33 @@ def _get_all_from_dataloader(encoder: torch.nn.Module,
             # (B, Embed_size)
             embeds_np = embeds.cpu().numpy().astype(np.float32)
 
-            all_images.append(images_np)
+            # all_images.append(images_np)
             all_labels.append(labels_np)
             all_embeds.append(embeds_np)
 
-    # (N_samples, H, W, C)
-    all_images = np.concatenate(all_images, axis=0)
+    # # (N_samples, H, W, C)
+    # all_images = np.concatenate(all_images, axis=0)
     # (N_samples)
     all_labels = np.concatenate(all_labels, axis=0)
     # (N_samples, Embed_size)
     all_embeds = np.concatenate(all_embeds, axis=0)
 
     # sort by labels
-    perm = np.argsort(all_labels)
-    all_images = all_images[perm]
-    all_labels = all_labels[perm]
-    all_embeds = all_embeds[perm]
+    order = np.argsort(all_labels)
+    # all_images = all_images[order]
+    all_labels = all_labels[order]
+    all_embeds = all_embeds[order]
 
-    return all_images, all_labels, all_embeds
+    return all_labels, all_embeds
 
 
-def _get_prototypes(gallery_images: np.ndarray,
-                    gallery_labels: np.ndarray,
+def _get_prototypes(gallery_labels: np.ndarray,
                     gallery_embeds: np.ndarray):
     """
     Create prototypes from gallery samples.
     Prototype embedding for specific label is computed as average of gallery embeddings with the same label.
 
     Parameters:
-        gallery_images (np.ndarray, shape=(N_samples, H, W, C), dtype=np.float32):
-            Array of gallery image samples.
-
         gallery_labels (np.ndarray, shape=(N_samples), dtype=int):
             Array of gallery labels.
 
@@ -726,9 +718,6 @@ def _get_prototypes(gallery_images: np.ndarray,
 
     Returns:
         Tuple[np.ndarray, np.ndarray, np.ndarray]:
-            proto_images (np.ndarray, shape=(N_labels, H, W, C), dtype=np.float32):\
-                Array of prototype sample images (one arbitrary image from gallery).
-
             proto_labels (np.ndarray, shape=(N_labels,), dtype=int): Array of prototype labels.
 
             proto_embeds (np.ndarray, shape=(N_labels, Embed_size), dtype=np.float32): Array of prototype embeddings.
@@ -739,7 +728,9 @@ def _get_prototypes(gallery_images: np.ndarray,
     # (N_labels), (N_labels)
     proto_labels, start_idxs = np.unique(gallery_labels, return_index=True)
 
-    proto_images = []
+    N_samples = len(gallery_labels)
+
+    # proto_images = []
     proto_embeds = []
 
     for i in range(len(proto_labels)):
@@ -747,24 +738,25 @@ def _get_prototypes(gallery_images: np.ndarray,
         if i + 1 < len(proto_labels):
             end = start_idxs[i + 1]
         else:
-            end = len(proto_labels)
+            end = N_samples
+
         proto_embeds.append(gallery_embeds[start:end].mean(axis=0))
 
         # get first image as prototype image
-        proto_images.append(gallery_images[start])
+        # proto_images.append(gallery_images[start])
 
     # (N_labels, Embed_size)
     proto_embeds = np.stack(proto_embeds)
 
     # (N_labels, H, W, C)
-    proto_images = np.stack(proto_images)
+    # proto_images = np.stack(proto_images)
 
     # normalize prototype embeddings
     proto_embeds = proto_embeds / \
         np.linalg.norm(proto_embeds, axis=1, keepdims=True)
 
-    # (N_labels, H, W, C), (N_labels), (N_labels, Embed_size)
-    return proto_images, proto_labels, proto_embeds
+    # (N_labels,), (N_labels, Embed_size)
+    return proto_labels, proto_embeds
 
 
 def _get_full_ranking(proto_labels: np.ndarray,
@@ -816,11 +808,11 @@ def test_identification(
     start_time = time.time()
 
     # load all gallery samples
-    gallery_images, gallery_labels, gallery_embeds = _get_all_from_dataloader(
+    gallery_labels, gallery_embeds = _get_all_from_dataloader(
         encoder, gallery_dataloader, device)
 
     # load all query samples
-    query_images, query_labels, query_embeds = _get_all_from_dataloader(
+    query_labels, query_embeds = _get_all_from_dataloader(
         encoder, query_dataloader, device)
 
     # normalize embeddings to lie on unit hypersphere (in case they were not normalized)
@@ -830,9 +822,9 @@ def test_identification(
         np.linalg.norm(query_embeds, axis=1, keepdims=True)
 
     # get prototypes
-    # (N_labels, H, W, C), (N_labels), (N_labels, emb_size)
-    proto_images, proto_labels, proto_embeds = _get_prototypes(
-        gallery_images, gallery_labels, gallery_embeds)
+    # (N_labels,), (N_labels, emb_size)
+    proto_labels, proto_embeds = _get_prototypes(
+        gallery_labels, gallery_embeds)
 
     # get ranked gallery labels (authors) for each query
     # (based on cosine similarity between embeddings)
