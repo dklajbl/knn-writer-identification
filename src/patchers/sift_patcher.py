@@ -109,42 +109,6 @@ class SIFTPatcher(BasePatcher):
 
         return patch
 
-    @staticmethod
-    def _duplicate_patches_to_count(
-        patches: list[np.ndarray],
-        target_count: int,
-    ) -> list[np.ndarray]:
-
-        """
-        Duplicate patches in order from strongest to weakest until target_count is reached.
-
-        Example:
-            patches = [p1, p2, p3], target_count = 8
-            result  = [p1, p2, p3, p1, p2, p3, p1, p2]
-
-        Parameters:
-            patches (list[np.ndarray]): Existing valid patches sorted from strongest to weakest.
-            target_count (int): Desired number of output patches.
-
-        Returns:
-            list[np.ndarray]: Patch list of length target_count.
-
-        Raises:
-            ValueError: If the input patch list is empty.
-        """
-
-        if len(patches) == 0:
-            raise ValueError("Cannot duplicate patches from an empty list.")
-
-        result = []
-        index = 0
-
-        while len(result) < target_count:
-            result.append(patches[index % len(patches)])
-            index += 1
-
-        return result
-
     def extract_patches(self, image: np.ndarray) -> np.ndarray:
 
         """
