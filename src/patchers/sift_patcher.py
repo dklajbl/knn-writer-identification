@@ -39,8 +39,7 @@ class SIFTPatcher(BasePatcher):
         if self.patch_height <= 0 or self.patch_width <= 0:
             raise ValueError("patch_height and patch_width must be > 0")
 
-        # cv2.SIFT cannot be pickled, so it is created lazily to support
-        # multiprocessing DataLoaders (which pickle the dataset and its patcher)
+        # cv2.SIFT cannot be pickled, so it is created lazily to support multiprocessing DataLoaders (which pickle the dataset and its patcher)
         self._sift = None
 
     @property
