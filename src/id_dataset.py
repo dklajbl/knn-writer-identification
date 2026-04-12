@@ -8,6 +8,7 @@ from typing import Callable
 
 import cv2
 import numpy as np
+np.bool = np.bool_
 import imgaug.augmenters as iaa
 import torch
 

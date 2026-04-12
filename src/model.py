@@ -254,6 +254,7 @@ class WriterIdentificationEncoder(nn.Module):
         self.transformer = nn.TransformerEncoder(
             encoder_layer,
             num_layers=num_transformer_layers,
+            enable_nested_tensor=False,
         )
 
         # Stage 3 - Multi-head attention pooling (input -> [B, N, hidden_dim]; output -> [B, hidden_dim] + weights [B, num_heads, N])
