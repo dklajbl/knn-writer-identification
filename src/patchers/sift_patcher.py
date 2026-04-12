@@ -39,8 +39,28 @@ class SIFTPatcher(BasePatcher):
         if self.patch_height <= 0 or self.patch_width <= 0:
             raise ValueError("patch_height and patch_width must be > 0")
 
-        # OpenCV SIFT detector
-        self.sift = cv2.SIFT_create(nfeatures=self.patch_count)
+        # cv2.SIFT cannot be pickled, so it is created lazily to support
+        # multiprocessing DataLoaders (which pickle the dataset and its patcher)
+        self._sift = None
+
+    @property
+    def sift(self) -> cv2.SIFT:
+
+        """
+        Lazily create and return the OpenCV SIFT detector.
+
+        The SIFT object is not created in __init__ because cv2.SIFT cannot be pickled,
+        and PyTorch DataLoader with num_workers > 0 pickles the dataset (and its patcher)
+        when spawning worker processes.
+
+        Returns:
+            cv2.SIFT: OpenCV SIFT feature detector.
+        """
+
+        if self._sift is None:
+            self._sift = cv2.SIFT_create(nfeatures=self.patch_count)
+
+        return self._sift
 
     def _extract_patch_around_keypoint(
         self,

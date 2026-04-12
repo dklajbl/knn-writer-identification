@@ -40,7 +40,8 @@ class BasePatcher(ABC):
             image (np.ndarray): input image as a NumPy array with shape (H, W, C).
 
         Returns:
-            np.ndarray: extracted patches as a NumPy array with shape (H, W, C)
+            np.ndarray: extracted patches as a NumPy array with shape (N, patch_H, patch_W, C).
+                N is the number of extracted patches, which may vary per image depending on the patcher.
 
         Raises:
             NotImplementedError: must be implemented by subclasses.

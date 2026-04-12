@@ -4,21 +4,17 @@ import os
 import sys
 import time
 
-import cv2
-import matplotlib.pyplot as plt
-import numpy as np
 import torch
 import torchvision
-from sklearn.metrics import average_precision_score, roc_auc_score, roc_curve
 from torch.utils.data import DataLoader
 
 from pytorch_metric_learning import losses
 
 from src.model import WriterIdentificationEncoder
 from src.id_dataset import IdDataset
-from src.tsne import plot_tsne
 
 from src.patchers.patcher_config import PatcherConfig, PATCH_METHODS
+from src.patchers.collate import pad_patches_collate
 
 from src.env_vars import NP_RANDOM_SEED
 
@@ -66,14 +62,22 @@ def parse_args() -> argparse.Namespace:
         "--patch-height",
         type=int,
         default=32,
-        help="Patch height used by random/algorithmic patchers (not useful for --patcher=grid)."
+        help="Patch height in pixels used by all patchers."
     )
 
     parser.add_argument(
         "--patch-width",
         type=int,
         default=32,
-        help="Patch width used by random/algorithmic patchers (not useful for --patcher=grid)."
+        help="Patch width in pixels used by all patchers."
+    )
+
+    parser.add_argument(
+        "--min-partial-ratio",
+        type=float,
+        default=0.3,
+        help="Minimum fraction of patch dimension for edge remainders to be kept (grid patcher only). "
+             "Strips thinner than this ratio are skipped to avoid interpolation artifacts."
     )
 
     parser.add_argument("--width", type=int, default=320)
@@ -216,8 +220,12 @@ def create_dataloaders(args) -> tuple[DataLoader, DataLoader | None]:
         patch_count=args.patch_count,
         random_seed=NP_RANDOM_SEED,
         patch_height=args.patch_height,
-        patch_width=args.patch_width
+        patch_width=args.patch_width,
+        min_partial_ratio=args.min_partial_ratio,
     )
+
+    # grid patcher produces variable patch counts per image, so a custom collate pads to the max count and creates masks
+    collate_fn = pad_patches_collate if args.patcher == "grid" else None
 
     # training dataset uses augmentation
     train_dataset = IdDataset(
@@ -233,13 +241,14 @@ def create_dataloaders(args) -> tuple[DataLoader, DataLoader | None]:
         num_workers=8,
         batch_size=args.batch_size,
         shuffle=True,
-        drop_last=True
+        drop_last=True,
+        collate_fn=collate_fn,
     )
 
     test_dataloader = None
 
     if args.gt_file_tst:
-        # testing dataset disables augmentation and uses deterministic cropping\
+        # testing dataset disables augmentation and uses deterministic cropping
         test_dataset = IdDataset(
             args.gt_file_tst,
             args.lmdb,
@@ -255,7 +264,8 @@ def create_dataloaders(args) -> tuple[DataLoader, DataLoader | None]:
             num_workers=0,
             batch_size=args.batch_size,
             shuffle=False,
-            drop_last=True
+            drop_last=True,
+            collate_fn=collate_fn,
         )
 
     return train_dataloader, test_dataloader
@@ -334,7 +344,9 @@ def train_one_step(
     images_1: torch.Tensor,
     images_2: torch.Tensor,
     labels: torch.Tensor,
-    device: torch.device
+    device: torch.device,
+    mask_1: torch.Tensor | None = None,
+    mask_2: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, float]:
 
     """
@@ -344,6 +356,8 @@ def train_one_step(
         images_1: [batch_size, patch_count, channels, height, width]
         images_2: [batch_size, patch_count, channels, height, width]
         labels:   [batch_size]
+        mask_1:   [batch_size, patch_count] (optional, bool, True = padding)
+        mask_2:   [batch_size, patch_count] (optional, bool, True = padding)
 
     Parameters:
         image_encoder (torch.nn.Module): Encoder model.
@@ -353,6 +367,9 @@ def train_one_step(
         images_2 (torch.Tensor): Second batch of patched images.
         labels (torch.Tensor): Batch labels.
         device (torch.device): Computation device.
+        mask_1 (torch.Tensor, optional, default=None): Padding mask for images_1. True = padded position to ignore.
+            Used when the grid patcher produces variable patch counts per image.
+        mask_2 (torch.Tensor, optional, default=None): Padding mask for images_2. Same convention as mask_1.
 
     Returns:
         tuple[torch.Tensor, float]: embeddings and scalar loss value.
@@ -363,13 +380,18 @@ def train_one_step(
     images_2 = images_2.to(device)
     labels = labels.to(device)
 
-    # concatenate both positive views into one batch.
+    # concatenate both positive views into one batch
     images = torch.cat([images_1, images_2], dim=0)  # [2 * batch-size, patch-count, channels, height, width]
     labels = torch.cat([labels, labels], dim=0)      # [2 * batch-size]
 
+    # concatenate padding masks the same way (None when all patches are real)
+    padding_mask = None
+    if mask_1 is not None and mask_2 is not None:
+        padding_mask = torch.cat([mask_1, mask_2], dim=0).to(device)  # [2 * batch-size, patch-count]
+
     optimizer.zero_grad()
 
-    embedding = image_encoder(images)  # [2 * batch-size, D]
+    embedding = image_encoder(images, padding_mask=padding_mask)  # [2 * batch-size, D]
     loss = loss_object(embedding, labels)
 
     loss.backward()
@@ -656,10 +678,22 @@ def main() -> None:
 
     loss_object = losses.NTXentLoss(temperature=args.temperature)
 
-    while True:
-        # evaluation_timer_start = time.time()
+    epoch = 0
 
-        for images_1, images_2, labels in train_dataloader:
+    while True:
+        epoch += 1
+        epoch_start = time.time()
+        epoch_loss_sum = 0.0
+        epoch_steps = 0
+
+        for batch in train_dataloader:
+
+            # grid patcher returns 5-tuple (with padding masks), random/sift return 3-tuple
+            if len(batch) == 5:
+                images_1, images_2, labels, mask_1, mask_2 = batch
+            else:
+                images_1, images_2, labels = batch
+                mask_1 = mask_2 = None
 
             # if iteration == args.start_iteration:
             #     # save preview of the first batch for quick visual inspection.
@@ -672,9 +706,13 @@ def main() -> None:
                 images_1=images_1,  # shape: [batch_size, patch_count, channels, height, width]
                 images_2=images_2,
                 labels=labels,
-                device=device
+                device=device,
+                mask_1=mask_1,
+                mask_2=mask_2,
             )
             loss_history.append(loss_value)
+            epoch_loss_sum += loss_value
+            epoch_steps += 1
 
             # This validation method is being skipped (not valid for our method of training)
             if should_run_evaluation(iteration, args, args.start_iteration):
@@ -699,6 +737,10 @@ def main() -> None:
 
             if iteration >= args.max_iterations:
                 break
+
+        epoch_time = time.time() - epoch_start
+        avg_loss = epoch_loss_sum / max(epoch_steps, 1)
+        logger.info(f"Epoch {epoch} | iter {iteration}/{args.max_iterations} | avg loss: {avg_loss:.4f} | time: {epoch_time:.1f}s")
 
         if iteration >= args.max_iterations:
             break

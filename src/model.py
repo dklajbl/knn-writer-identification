@@ -126,13 +126,20 @@ class MultiHeadAttentionPooling(nn.Module):
         # restore hidden_dim from the concatenated head outputs
         self.out_proj = nn.Linear(hidden_dim, hidden_dim)
 
-    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    def forward(
+        self,
+        x: torch.Tensor,
+        padding_mask: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
 
         """
         Pool N patch embeddings into a single image embedding using multi-head attention.
 
         Parameters:
             x (torch.Tensor): Patch embeddings with shape [B, N, hidden_dim].
+            padding_mask (torch.Tensor, optional, default=None): boolean mask with shape [B, N].
+                True = padded position (ignored), False = real patch.
+                When provided, padded positions receive -inf scores before softmax so they contribute zero attention weight.
 
         Returns:
             tuple[torch.Tensor, torch.Tensor]:
@@ -144,7 +151,12 @@ class MultiHeadAttentionPooling(nn.Module):
         all_weights = []
 
         for scorer, head_proj in zip(self.scorers, self.head_projs):
-            scores = scorer(x).squeeze(-1)                          # [B, N]
+            scores = scorer(x).squeeze(-1)  # [B, N]
+
+            # mask padded positions so they get zero weight after softmax
+            if padding_mask is not None:
+                scores = scores.masked_fill(padding_mask, float('-inf'))
+
             weights = F.softmax(scores, dim=-1)                     # [B, N]
             pooled = torch.bmm(weights.unsqueeze(1), x).squeeze(1)  # [B, hidden_dim]
             head_outputs.append(head_proj(pooled))                  # [B, head_dim]
@@ -256,6 +268,7 @@ class WriterIdentificationEncoder(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
+        padding_mask: torch.Tensor | None = None,
         return_patch_weights: bool = False,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
 
@@ -264,8 +277,12 @@ class WriterIdentificationEncoder(nn.Module):
 
         Parameters:
             x (torch.Tensor): Patched images with shape [B, N, C, H, W], where B is the batch size, N is the number of patches per image.
+            padding_mask (torch.Tensor | None): boolean mask with shape [B, N].
+                True = padded position (ignored), False = real patch.
+                Used by the grid patcher path where different images produce different numbers of patches and the batch is padded to the maximum count.
+                When None, all patches are treated as real (random/sift patchers).
             return_patch_weights (bool, default=False): When True, also return the per-head per-patch attention weights from the pooling stage.
-                                                        Useful for visualizing which patches each head found most informative.
+                Useful for visualizing which patches each head found most informative.
 
         Returns:
             torch.Tensor: L2-normalized image embeddings with shape [B, embed_dim].
@@ -285,10 +302,11 @@ class WriterIdentificationEncoder(nn.Module):
             x = x + self.pe[:N].unsqueeze(0)  # [1, N, hidden_dim] broadcast -> [B, N, hidden_dim]
 
         # Stage 2 - Cross-patch Transformer: every patch attends to every other patch
-        x = self.transformer(x)  # [B, N, hidden_dim]
+        # src_key_padding_mask tells the transformer which positions are padding (True = ignore)
+        x = self.transformer(x, src_key_padding_mask=padding_mask)  # [B, N, hidden_dim]
 
         # Stage 3 - Multi-head attention pooling: N embeddings -> 1 image embedding
-        image_emb, patch_weights = self.pool(x)  # image_emb: [B, hidden_dim]; patch_weights: [B, num_heads, N]
+        image_emb, patch_weights = self.pool(x, padding_mask=padding_mask)  # image_emb: [B, hidden_dim]; patch_weights: [B, num_heads, N]
 
         # Normalize + project + L2 normalize
         image_emb = self.pre_proj_norm(image_emb)       # [B, hidden_dim]
