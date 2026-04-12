@@ -47,7 +47,7 @@ class SIFTPatcher(BasePatcher):
         # cv2.SIFT cannot be pickled, so it is created lazily to support multiprocessing DataLoaders (which pickle the dataset and its patcher)
         self._sift = None
 
-        # fallback patcher for when SIFT finds no keypoints
+        # fallback patcher for when SIFT finds no keypoints or patch_count is not satisfied (to fill SIFT patches with random ones)
         self._random_fallback = RandomPatcher(config)
 
     @property
@@ -195,6 +195,21 @@ class SIFTPatcher(BasePatcher):
             return self._random_fallback.extract_patches(image)
 
         if len(patches) < self.patch_count:
-            patches = self._duplicate_patches_to_count(patches, self.patch_count)
+            # remaining patches (patch_count not satisfied) are filled with random ones
+
+            remaining = self.patch_count - len(patches)
+            original_count = self._random_fallback.patch_count
+
+            try:
+                if remaining == 1:  # if 1 patch is missing, make random patcher to extract 2 patches and choose just the 1st one - reason is when patch_count = 1, the random patcher returns original image
+                    self._random_fallback.patch_count = 2
+                    random_patches = self._random_fallback.extract_patches(image)
+                    patches.append(random_patches[0])
+                else:
+                    self._random_fallback.patch_count = remaining
+                    random_patches = self._random_fallback.extract_patches(image)
+                    patches.extend(list(random_patches))
+            finally:
+                self._random_fallback.patch_count = original_count
 
         return np.stack(patches, axis=0)
