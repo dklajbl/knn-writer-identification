@@ -1,8 +1,13 @@
+import logging
+
 import cv2
 import numpy as np
 from src.patchers.base_patcher import BasePatcher
 from src.patchers.patcher_config import PatcherConfig
+from src.patchers.random_patcher import RandomPatcher
 from src.patchers.utils import is_empty_or_padded_patch, normalize_patch_size
+
+logger = logging.getLogger(__name__)
 
 
 class SIFTPatcher(BasePatcher):
@@ -41,6 +46,9 @@ class SIFTPatcher(BasePatcher):
 
         # cv2.SIFT cannot be pickled, so it is created lazily to support multiprocessing DataLoaders (which pickle the dataset and its patcher)
         self._sift = None
+
+        # fallback patcher for when SIFT finds no keypoints
+        self._random_fallback = RandomPatcher(config)
 
     @property
     def sift(self) -> cv2.SIFT:
@@ -183,7 +191,8 @@ class SIFTPatcher(BasePatcher):
                 patches.append(patch)
 
         if len(patches) == 0:
-            raise ValueError("SIFT could not extract any valid patches from the image.")
+            logger.warning("SIFT found no valid patches, falling back to random patcher.")
+            return self._random_fallback.extract_patches(image)
 
         if len(patches) < self.patch_count:
             patches = self._duplicate_patches_to_count(patches, self.patch_count)

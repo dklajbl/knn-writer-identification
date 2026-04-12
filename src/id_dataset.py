@@ -580,12 +580,9 @@ class IdDataset(torch.utils.data.Dataset):
         if self.aug is not None:
             image_1, image_2 = self.aug(images=[image_1, image_2])
 
-        # patch both images (skip sample if patcher fails, e.g. SIFT finds no keypoints)
-        try:
-            image_1 = self.patcher.extract_patches(image_1)
-            image_2 = self.patcher.extract_patches(image_2)
-        except ValueError:
-            return self[random.randint(0, len(self) - 1)]
+        # patch both images
+        image_1 = self.patcher.extract_patches(image_1)
+        image_2 = self.patcher.extract_patches(image_2)
 
         if self.transform is None:
             raise ValueError("transform must be provided when using patched images.")
