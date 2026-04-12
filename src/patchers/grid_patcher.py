@@ -61,6 +61,10 @@ class GridPatcher(BasePatcher):
         if image.ndim != 3:
             raise ValueError(f"Expected image shape (H, W, C), got {image.shape}")
 
+        # SPECIAL CASE: patch_count == 1 -> return full image (with expanded shape "patch_count"=1)
+        if self.patch_count == 1:
+            return np.expand_dims(image, axis=0)
+
         img_h, img_w, _ = image.shape
 
         # minimum pixel extent for an edge remainder to be kept as a partial patch
