@@ -54,7 +54,7 @@ The created container will be located at `singularity/knn_container_cpu.sif` or 
     * next you can run any code you want (e.g. `python3 ./src/main.py`)
 5. **!! Important !!** Make sure you have execute permissions for `singularity_script.sh`
     * otherwise use `chmod u+rwx ./singularity/singularity_script.sh`
-5. Use command: `qstat ./singularity/job.sh` to submit job
+5. Use command: `qsub ./singularity/job.sh` to submit job
 6. After the job has finished, the run logs will be located in `LOG_DIR="${HOME_DIR}/knn_job_logs/job_${CUR_TIME}"`. This includes:
     * `knn_job.out` - stdout outputs of `job.sh`
     * `knn_job.err` - stderr outputs of `job.sh`

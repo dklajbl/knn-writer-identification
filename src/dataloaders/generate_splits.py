@@ -2,7 +2,7 @@
 """
 Read one or more whitespace-delimited text files whose lines have the format:
 
-    <filename>  <author_id>  <width>  [<other fields> ...]
+    <filename>  <author_id>  <width>  <height>  [<other fields> ...]
 
 and produce train/val/test splits that are disjoint by author.
 
@@ -98,61 +98,76 @@ def _fmt(v, is_int=False):
     return f"{int(v):,}"
 
 
-def two_col_stats(counts, widths):
-    """Return a formatted two-column statistics table (Samples | Width).
+def three_col_stats(counts, widths, heights):
+    """Return a formatted three-column statistics table (Samples | Width | Height).
 
-    Prints Min, p25, Median, p75, p95, Max, Avg for both columns.
+    Prints Min, p25, Median, p75, p95, Max, Avg for all three columns.
     counts  -- sorted list of per-author sample counts (ints).
     widths  -- flat list of line-width values (ints); may be empty,
                in which case the Width column shows n/a throughout.
+    heights -- flat list of line-height values (ints); may be empty,
+               in which case the Height column shows n/a throughout.
     """
     if not counts:
         return "  (no data)\n"
 
-    sorted_w = sorted(widths) if widths else []
+    sorted_w = sorted(widths)  if widths  else []
+    sorted_h = sorted(heights) if heights else []
     has_w = bool(sorted_w)
+    has_h = bool(sorted_h)
 
     total = sum(counts)
     n     = len(counts)
     w_avg = sum(sorted_w) / len(sorted_w) if has_w else None
+    h_avg = sum(sorted_h) / len(sorted_h) if has_h else None
+
+    def wv(p=None, mn=False, mx=False):
+        if not has_w:
+            return "n/a"
+        if mn: return _fmt(sorted_w[0],  is_int=True)
+        if mx: return _fmt(sorted_w[-1], is_int=True)
+        return _fmt(percentile(sorted_w, p))
+
+    def hv(p=None, mn=False, mx=False):
+        if not has_h:
+            return "n/a"
+        if mn: return _fmt(sorted_h[0],  is_int=True)
+        if mx: return _fmt(sorted_h[-1], is_int=True)
+        return _fmt(percentile(sorted_h, p))
 
     rows = [
-        ("Min",    _fmt(counts[0],                  is_int=True),
-                   _fmt(sorted_w[0],                is_int=True)  if has_w else "n/a"),
-        ("p25",    _fmt(percentile(counts, 25)),
-                   _fmt(percentile(sorted_w, 25))                 if has_w else "n/a"),
-        ("Median", _fmt(percentile(counts, 50)),
-                   _fmt(percentile(sorted_w, 50))                 if has_w else "n/a"),
-        ("p75",    _fmt(percentile(counts, 75)),
-                   _fmt(percentile(sorted_w, 75))                 if has_w else "n/a"),
-        ("p95",    _fmt(percentile(counts, 95)),
-                   _fmt(percentile(sorted_w, 95))                 if has_w else "n/a"),
-        ("Max",    _fmt(counts[-1],                 is_int=True),
-                   _fmt(sorted_w[-1],               is_int=True)  if has_w else "n/a"),
+        ("Min",    _fmt(counts[0],  is_int=True), wv(mn=True),  hv(mn=True)),
+        ("p25",    _fmt(percentile(counts, 25)),  wv(p=25),     hv(p=25)),
+        ("Median", _fmt(percentile(counts, 50)),  wv(p=50),     hv(p=50)),
+        ("p75",    _fmt(percentile(counts, 75)),  wv(p=75),     hv(p=75)),
+        ("p95",    _fmt(percentile(counts, 95)),  wv(p=95),     hv(p=95)),
+        ("Max",    _fmt(counts[-1], is_int=True), wv(mx=True),  hv(mx=True)),
         ("Avg",    f"{total/n:,.2f}",
-                   f"{w_avg:,.2f}"                                if has_w else "n/a"),
+                   f"{w_avg:,.2f}" if has_w else "n/a",
+                   f"{h_avg:,.2f}" if has_h else "n/a"),
     ]
 
     # Compute column widths dynamically so values always right-align neatly.
     lbl_w  = max(len(r[0]) for r in rows)
-    samp_w = max(len(r[1]) for r in rows + [("", "Samples", "")])
-    wid_w  = max(len(r[2]) for r in rows + [("", "", "Width")])
+    samp_w = max(len(r[1]) for r in rows + [("", "Samples", "", "")])
+    wid_w  = max(len(r[2]) for r in rows + [("", "", "Width", "")])
+    hei_w  = max(len(r[3]) for r in rows + [("", "", "", "Height")])
 
-    sep = f"  {'-' * lbl_w}-+-{'-' * samp_w}-+-{'-' * wid_w}"
-    hdr = f"  {'Stat':<{lbl_w}} | {'Samples':>{samp_w}} | {'Width':>{wid_w}}"
+    sep = f"  {'-' * lbl_w}-+-{'-' * samp_w}-+-{'-' * wid_w}-+-{'-' * hei_w}"
+    hdr = f"  {'Stat':<{lbl_w}} | {'Samples':>{samp_w}} | {'Width':>{wid_w}} | {'Height':>{hei_w}}"
 
     lines = [hdr, sep]
-    for label, sv, wv in rows:
-        lines.append(f"  {label:<{lbl_w}} | {sv:>{samp_w}} | {wv:>{wid_w}}")
+    for label, sv, wv_, hv_ in rows:
+        lines.append(f"  {label:<{lbl_w}} | {sv:>{samp_w}} | {wv_:>{wid_w}} | {hv_:>{hei_w}}")
     return "\n".join(lines) + "\n"
 
 
-def split_stats(split_name, per_author_counts, total_authors, total_samples, widths):
+def split_stats(split_name, per_author_counts, total_authors, total_samples, widths, heights):
     """Format a labelled statistics block for one split (train / val / test).
 
     Reports author and sample counts as both absolute numbers and percentages
-    of the overall totals, followed by the two-column per-author sample and
-    width distribution table.
+    of the overall totals, followed by the three-column per-author sample,
+    width, and height distribution table.
     """
     counts = sorted(per_author_counts.values())
     if not counts:
@@ -164,14 +179,14 @@ def split_stats(split_name, per_author_counts, total_authors, total_samples, wid
         f"  Authors : {n:,} ({n/total_authors*100:.1f}%)\n"
         f"  Samples : {total:,} ({total/total_samples*100:.1f}%)\n"
     )
-    return header + two_col_stats(counts, widths)
+    return header + three_col_stats(counts, widths, heights)
 
 
-def file_stats(path, author_counts, widths):
+def file_stats(path, author_counts, widths, heights):
     """Format raw per-file statistics (before any filtering or undersampling).
 
-    Shows total line and author counts followed by the two-column per-author
-    sample and width distribution table.
+    Shows total line and author counts followed by the three-column per-author
+    sample, width, and height distribution table.
     """
     counts = sorted(author_counts.values())
     if not counts:
@@ -182,7 +197,7 @@ def file_stats(path, author_counts, widths):
         f"  Lines   : {total:,}\n"
         f"  Authors : {n:,}\n"
     )
-    return header + two_col_stats(counts, widths)
+    return header + three_col_stats(counts, widths, heights)
 
 
 def main():
@@ -252,6 +267,7 @@ def main():
     for path, ratio in zip(args.files, args.ratios):
         raw_counts = Counter()
         raw_widths = []
+        raw_heights = []
         with open(path, "r", encoding="utf-8", errors="replace") as f:
             for line in f:
                 total_lines += 1
@@ -262,6 +278,7 @@ def main():
                     p1_deleted_malformed += 1
                     continue
                 raw_counts[parts[1]] += 1
+
                 width = None
                 if len(parts) >= 3:
                     try:
@@ -269,6 +286,14 @@ def main():
                         raw_widths.append(width)
                     except ValueError:
                         pass
+
+                # Parse height from the 4th column (index 3).
+                if len(parts) >= 4:
+                    try:
+                        raw_heights.append(int(parts[3]))
+                    except ValueError:
+                        pass
+
                 # Drop line if width is missing or below --width_min.
                 if args.width_min is not None:
                     if width is None or width < args.width_min:
@@ -281,7 +306,7 @@ def main():
                     p1_deleted_undersample += 1
 
         print(f"  {path}  (ratio={ratio})")
-        print(file_stats(path, raw_counts, raw_widths), end="")
+        print(file_stats(path, raw_counts, raw_widths, raw_heights), end="")
 
     print(f"\nMerged after undersampling: {total_lines:,} lines, {len(author_counts):,} authors.")
 
@@ -334,7 +359,8 @@ def main():
 
     per_author = defaultdict(Counter)   # split -> {author: lines written}
     author_written = Counter()          # author -> total lines written (used to enforce max_count)
-    split_widths = defaultdict(list)    # split -> flat list of width values (for stats)
+    split_widths  = defaultdict(list)   # split -> flat list of width  values (for stats)
+    split_heights = defaultdict(list)   # split -> flat list of height values (for stats)
 
     # Per-reason drop counters for Pass 2 (mirroring Pass 1 where applicable).
     p2_deleted_malformed   = 0  # fewer than 2 fields
@@ -374,6 +400,14 @@ def main():
                             p2_deleted_width_min += 1
                             continue
 
+                    # Parse height from the 4th column (index 3).
+                    height = None
+                    if len(parts) >= 4:
+                        try:
+                            height = int(parts[3])
+                        except ValueError:
+                            pass
+
                     # Mirror Pass 1 undersampling (identical seed → identical decisions).
                     if rng.random() > ratio:
                         p2_deleted_undersample += 1
@@ -395,6 +429,8 @@ def main():
                     per_author[split][author] += 1
                     if width is not None:
                         split_widths[split].append(width)
+                    if height is not None:
+                        split_heights[split].append(height)
 
     total_final = sum(sum(c.values()) for c in per_author.values())
     total_authors = sum(len(c) for c in per_author.values())
@@ -412,7 +448,10 @@ def main():
 
     print(f"\nDone! Total written: {total_final:,} lines, pruned authors: {pruned_min:,}")
     for split in ("train", "val", "test"):
-        print(split_stats(split, per_author[split], total_authors, total_final, split_widths[split]), end="")
+        print(split_stats(
+            split, per_author[split], total_authors, total_final,
+            split_widths[split], split_heights[split],
+        ), end="")
 
     # --- Build gallery.txt and query.txt from the test split ---
     # Read test.txt back, group lines by author, then for each author that has

@@ -3,6 +3,10 @@ import logging
 import os
 import sys
 import time
+from contextlib import nullcontext
+
+import numpy as np
+np.bool = bool
 
 import torch
 import torchvision
@@ -15,6 +19,7 @@ from src.id_dataset import IdDataset
 
 from src.patchers.patcher_config import PatcherConfig, PATCH_METHODS
 from src.patchers.collate import pad_patches_collate
+from src.eval import test_identification
 
 from src.env_vars import NP_RANDOM_SEED
 
@@ -39,8 +44,12 @@ def parse_args() -> argparse.Namespace:
         help="Text file with an image file name and id on each line."
     )
     parser.add_argument(
-        "--gt-file-tst",
-        help="Testing text file with an image file name and id on each line."
+        "--gt-file-gallery",
+        help="Gallery text file with an image file name and id on each line."
+    )
+    parser.add_argument(
+        "--gt-file-query",
+        help="Query text file with an image file name and id on each line."
     )
     parser.add_argument(
         "--lmdb",
@@ -75,7 +84,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--width", type=int, default=320)
 
     parser.add_argument("--start-iteration", default=0, type=int)
-    parser.add_argument("--max-iterations", default=50000, type=int)
+    parser.add_argument("--epochs", default=30, type=int)
     parser.add_argument(
         "--view-step",
         default=50,
@@ -118,7 +127,7 @@ def configure_logging(logging_level: str) -> None:
     """
 
     log_formatter = logging.Formatter(
-        "CONVERT LINES TO JSONL - %(asctime)s - %(filename)s - %(levelname)s - %(message)s"
+        "%(asctime)s - %(filename)s - %(levelname)s - %(message)s"
     )
     log_formatter.converter = time.gmtime
 
@@ -192,7 +201,7 @@ def create_model(args, device: torch.device) -> torch.nn.Module:
     return image_encoder
 
 
-def create_dataloaders(args) -> tuple[DataLoader, DataLoader | None]:
+def create_dataloaders(args) -> tuple[DataLoader, DataLoader, DataLoader | None]:
 
     """
     Create training and optional testing dataloaders.
@@ -230,37 +239,60 @@ def create_dataloaders(args) -> tuple[DataLoader, DataLoader | None]:
     )
     train_dataloader = DataLoader(
         train_dataset,
-        num_workers=8,
+        num_workers=1,
         batch_size=args.batch_size,
         shuffle=True,
         drop_last=True,
         collate_fn=collate_fn,
+        pin_memory=True,
+        persistent_workers=True,
+        prefetch_factor=4,
     )
 
-    test_dataloader = None
+    gallery_dataloader = None
+    query_dataloader = None
 
-    if args.gt_file_tst:
+    if args.gt_file_gallery and args.gt_file_query:
         # testing dataset disables augmentation and uses deterministic cropping
-        test_dataset = IdDataset(
-            args.gt_file_tst,
+        gallery_dataset = IdDataset(
+            args.gt_file_gallery,
             args.lmdb,
             transform=transform,
             augment=False,
-            restrict_data=True,
+            restrict_data=False,
             test=True,
             width=args.width,
             patcher_config=patcher_config
         )
-        test_dataloader = DataLoader(
-            test_dataset,
-            num_workers=0,
+        gallery_dataloader = DataLoader(
+            gallery_dataset,
+            num_workers=1,
             batch_size=args.batch_size,
             shuffle=False,
-            drop_last=True,
+            drop_last=False,
             collate_fn=collate_fn,
         )
 
-    return train_dataloader, test_dataloader
+        query_dataset = IdDataset(
+            args.gt_file_query,
+            args.lmdb,
+            transform=transform,
+            augment=False,
+            restrict_data=False,
+            test=True,
+            width=args.width,
+            patcher_config=patcher_config
+        )
+        query_dataloader = DataLoader(
+            query_dataset,
+            num_workers=1,
+            batch_size=args.batch_size,
+            shuffle=False,
+            drop_last=False,
+            collate_fn=collate_fn,
+        )
+
+    return train_dataloader, gallery_dataloader, query_dataloader
 
 
 # def save_first_batch_images(images_1: torch.Tensor, images_2: torch.Tensor, show_dir: str) -> None:
@@ -309,24 +341,24 @@ def create_dataloaders(args) -> tuple[DataLoader, DataLoader | None]:
 #     plt.close("all")
 
 
-def should_run_evaluation(iteration: int, args, start_iteration: int) -> bool:
-
-    """
-    Decide whether evaluation should be run
-
-    Parameters:
-        iteration (int): Current iteration.
-        args (argparse.Namespace): Parsed arguments.
-        start_iteration (int): Starting iteration.
-
-    Returns:
-        bool: True if evaluation should be run.
-    """
-
-    return (
-        (iteration % args.view_step == 0 and iteration > start_iteration)
-        or (args.eval_on_start and iteration == start_iteration)
-    )
+# def should_run_evaluation(iteration: int, args, start_iteration: int) -> bool:
+#
+#     """
+#     Decide whether evaluation should be run
+#
+#     Parameters:
+#         iteration (int): Current iteration.
+#         args (argparse.Namespace): Parsed arguments.
+#         start_iteration (int): Starting iteration.
+#
+#     Returns:
+#         bool: True if evaluation should be run.
+#     """
+#
+#     return (
+#         (iteration % args.view_step == 0 and iteration > start_iteration)
+#         or (args.eval_on_start and iteration == start_iteration)
+#     )
 
 
 def train_one_step(
@@ -337,6 +369,7 @@ def train_one_step(
     images_2: torch.Tensor,
     labels: torch.Tensor,
     device: torch.device,
+    scaler: torch.cuda.amp.GradScaler,
     mask_1: torch.Tensor | None = None,
     mask_2: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, float]:
@@ -359,6 +392,7 @@ def train_one_step(
         images_2 (torch.Tensor): Second batch of patched images.
         labels (torch.Tensor): Batch labels.
         device (torch.device): Computation device.
+        scaler (torch.cuda.amp.GradScaler): Gradient scaler for mixed precision training.
         mask_1 (torch.Tensor, optional, default=None): Padding mask for images_1. True = padded position to ignore.
             Used when the grid patcher produces variable patch counts per image.
         mask_2 (torch.Tensor, optional, default=None): Padding mask for images_2. Same convention as mask_1.
@@ -381,13 +415,30 @@ def train_one_step(
     if mask_1 is not None and mask_2 is not None:
         padding_mask = torch.cat([mask_1, mask_2], dim=0).to(device)  # [2 * batch-size, patch-count]
 
-    optimizer.zero_grad()
+    optimizer.zero_grad(set_to_none=True)
 
-    embedding = image_encoder(images, padding_mask=padding_mask)  # [2 * batch-size, D]
-    loss = loss_object(embedding, labels)
+    use_amp = device.type == "cuda"
 
-    loss.backward()
-    optimizer.step()
+    autocast_context = (
+        torch.autocast(device_type="cuda", dtype=torch.float16)
+        if use_amp
+        else nullcontext()
+    )
+
+    with autocast_context:
+        embedding = image_encoder(images, padding_mask=padding_mask)
+        loss = loss_object(embedding, labels)
+
+    if use_amp and scaler is not None:
+        scaler.scale(loss).backward()
+        scaler.step(optimizer)
+        scaler.update()
+    else:
+        loss.backward()
+        optimizer.step()
+
+    # loss.backward()
+    # optimizer.step()
 
     return embedding, loss.item()
 
@@ -639,12 +690,12 @@ def main() -> None:
     """
     Main training entry point.
     """
-
+    start_time = time.time()
     args = parse_args()
 
     configure_logging(args.logging_level)
 
-    logger.info(" ".join(sys.argv))
+    logger.info("\t\t\n".join(sys.argv))
     logger.info(f"ARGS {args}")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -656,7 +707,9 @@ def main() -> None:
     # show_dir_heat_maps_path, show_dir_tsne_path, show_dir_retrieval_path = ensure_directories(args)
 
     image_encoder = create_model(args, device)
-    train_dataloader, test_dataloader = create_dataloaders(args)
+    image_encoder = torch.compile(image_encoder, mode="default")
+
+    train_dataloader, gallery_dataloader, query_dataloader = create_dataloaders(args)
 
     optimizer = torch.optim.AdamW(
         image_encoder.parameters(),
@@ -664,11 +717,13 @@ def main() -> None:
         weight_decay=args.weight_decay
     )
 
-    loss_history = [0] * args.start_iteration
+    loss_history = [0.0] * args.start_iteration
     iteration = args.start_iteration
     last_view_iteration = args.start_iteration
 
     loss_object = losses.NTXentLoss(temperature=args.temperature)
+
+    scaler = torch.amp.GradScaler('cuda')
 
     epoch = 0
 
@@ -678,8 +733,9 @@ def main() -> None:
         epoch_loss_sum = 0.0
         epoch_steps = 0
 
-        for batch in train_dataloader:
+        image_encoder.train()
 
+        for batch in train_dataloader:
             # grid patcher returns 5-tuple (with padding masks), random/sift return 3-tuple
             if len(batch) == 5:
                 images_1, images_2, labels, mask_1, mask_2 = batch
@@ -699,42 +755,49 @@ def main() -> None:
                 images_2=images_2,
                 labels=labels,
                 device=device,
+                scaler=scaler,
                 mask_1=mask_1,
                 mask_2=mask_2,
             )
-            loss_history.append(loss_value)
-            epoch_loss_sum += loss_value
-            epoch_steps += 1
+            if loss_value:
+                loss_history.append(loss_value)
+                epoch_loss_sum += loss_value
+                epoch_steps += 1
 
-            # This validation method is being skipped (not valid for our method of training)
-            if should_run_evaluation(iteration, args, args.start_iteration):
-                pass
-            #     last_view_iteration = evaluate_and_save_outputs(
-            #         iteration=iteration,
-            #         loss_history=loss_history,
-            #         last_view_iteration=last_view_iteration,
-            #         t_start=evaluation_timer_start,
-            #         image_encoder=image_encoder,
-            #         embedding=embedding,
-            #         args=args,
-            #         show_dir_heat_maps_path=show_dir_heat_maps_path,
-            #         show_dir_tsne_path=show_dir_tsne_path,
-            #         show_dir_retrieval_path=show_dir_retrieval_path,
-            #         test_dataloader=test_dataloader,
-            #         device=device
-            #     )
-            #     evaluation_timer_start = time.time()
-
-            iteration += 1
-
-            if iteration >= args.max_iterations:
-                break
+        # Evaluation
+        image_encoder.eval()
+        with torch.no_grad():
+            metrics = test_identification(
+                encoder=image_encoder,
+                gallery_dataloader=gallery_dataloader,
+                query_dataloader=query_dataloader,
+                device=device,
+            )
+            logger.info(
+                f"CSI METRICS {iteration}: "
+                + " ".join(
+                    f"{k}:{v}"
+                    for k, v in [
+                        (
+                            "cmc",
+                            "[" + ", ".join(f"{x:.3f}" for x in metrics.csi_metrics.cmc[:10]) + "]",
+                        ),
+                        ("mrr", f"{metrics.csi_metrics.mrr:.3f}"),
+                    ]
+                )
+            )
+            logger.info(
+                f"OSI METRICS {iteration}:\n"
+                + "\n".join(
+                    f"{k}: {v}" for k, v in metrics.osi_metrics.main_fpir_op_points.items()
+                )
+            )
 
         epoch_time = time.time() - epoch_start
-        avg_loss = epoch_loss_sum / max(epoch_steps, 1)
-        logger.info(f"Epoch {epoch} | iter {iteration}/{args.max_iterations} | avg loss: {avg_loss:.4f} | time: {epoch_time:.1f}s")
+        avg_loss = epoch_loss_sum / (epoch_steps + 1)
+        logger.info(f"Epoch {epoch} | avg loss: {avg_loss:.4f} | time: {epoch_time:.1f}s")
 
-        if iteration >= args.max_iterations:
+        if epoch >= args.epochs:
             break
 
 
