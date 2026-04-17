@@ -1,14 +1,12 @@
-import re
-import uuid
 import lmdb
 import random
 import logging
 from collections import defaultdict
-from typing import Callable
 
 import cv2
 import numpy as np
-np.bool = np.bool_
+np.bool = bool
+
 import imgaug.augmenters as iaa
 import torch
 
@@ -22,23 +20,19 @@ logger = logging.getLogger(__name__)
 class IdDataset(torch.utils.data.Dataset):
 
     """
-    PyTorch Dataset class for loading image lines or page segments from an LMDB database
+    PyTorch Dataset class for loading line images from an LMDB database.
 
-     The dataset supports two modes:
-        - page=False: each sample is a single line image
-        - page=True: each sample belongs to a page and may be split into multiple windows
+    Each sample is a single line image identified by (cluster_id, image_name).
+    Images are loaded from LMDB, optionally augmented, patched, and converted to tensors.
     """
 
     def __init__(
         self,
         file_name: str,
         lmdb_path: str,
-        width: int = 320,
-        transform: Callable | None = None,
         augment: bool = True,
         restrict_data: bool = False,
         test: bool = False,
-        page: bool = False,
         patcher_config: PatcherConfig | None = None,
     ):
         """
@@ -47,12 +41,9 @@ class IdDataset(torch.utils.data.Dataset):
         Parameters:
             file_name (str): Path to the file containing image names and IDs.
             lmdb_path (str): Path to the LMDB database
-            width (int): Target image width
-            transform (callable): transform applied to images (resize, toTensor, ...)
             augment (bool): Whether to use image augmentation or not
             restrict_data (bool): Whether to restrict dataset size
             test (bool): Whether the dataset is used in test mode
-            page (bool): Whether dataset works in page mode
             patcher_config (PatcherConfig): Patcher configuration
 
         Raises:
@@ -66,12 +57,9 @@ class IdDataset(torch.utils.data.Dataset):
 
         self.file_name = file_name
         self.lmdb_path = lmdb_path
-        self.width = width
-        self.transform = transform
         self.augment = augment
         self.restrict_data = restrict_data
         self.test = test
-        self.page = page
 
         self.patcher = make_patcher(patcher_config)
 
@@ -100,7 +88,7 @@ class IdDataset(torch.utils.data.Dataset):
         """
         Load lines from the input file and group them by ID
 
-        The index file usually contains:
+        The index file contains:
             image_name cluster_id
 
         Example:
@@ -112,32 +100,16 @@ class IdDataset(torch.utils.data.Dataset):
         with open(self.file_name, 'r', encoding="utf-8") as file:
             raw_lines = file.readlines()
 
-        if not self.page:
-            # in normal mode, each line contains image_name and numeric cluster_id.
+        parsed_lines = [line.split()[:2] for line in raw_lines]
 
-            parsed_lines = [line.split()[:2] for line in raw_lines]
+        self.lines = [
+            (int(parts[1]), parts[0])
+            for parts in parsed_lines
+            if len(parts) == 2
+        ]
 
-            self.lines = [
-                (int(parts[1]), parts[0])
-                for parts in parsed_lines
-                if len(parts) == 2
-            ]
-
-            for cluster_id, image_name in self.lines:
-                self.id_lines[cluster_id].append(image_name)
-
-        else:
-            # in page mode, the first token is a line_id.
-            # several line_ids can belong to the same page_id.
-
-            line_ids = [line.split()[0].strip() for line in raw_lines if line.split()]
-            self.lines = [
-                (self.convert_line_id_to_page_id(line_id), line_id)
-                for line_id in line_ids
-            ]
-
-            for page_id, line_id in self.lines:
-                self.id_lines[page_id].append(line_id)
+        for cluster_id, image_name in self.lines:
+            self.id_lines[cluster_id].append(image_name)
 
     def _ensure_lmdb_open(self) -> None:
 
@@ -176,25 +148,13 @@ class IdDataset(torch.utils.data.Dataset):
                 iaa.convolutional.EdgeDetect(alpha=(0.05, 0.15)),
                 iaa.convolutional.Emboss(alpha=(0.05, 0.2), strength=(0.2, 0.7)),
                 iaa.convolutional.Sharpen(alpha=(0.05, 0.2), lightness=(0.8, 1.2)),
-                iaa.color.AddToHue(value=(-64, 64)),
-                iaa.color.AddToBrightness(add=(-40, 40)),
-                iaa.color.AddToSaturation(value=(-64, 64)),
-                iaa.color.Grayscale(),
-                iaa.color.Grayscale(),
-                iaa.color.MultiplyBrightness(mul=(0.8, 1.2)),
-                iaa.color.MultiplyHue(mul=(-0.7, 0.7)),
-                iaa.color.MultiplySaturation(mul=(0.0, 2.0)),
-                iaa.color.Posterize(nb_bits=(2, 8)),
                 iaa.contrast.AllChannelsCLAHE(clip_limit=(0.1, 8), tile_grid_size_px=(3, 12), tile_grid_size_px_min=3),
                 iaa.contrast.CLAHE(clip_limit=(0.1, 8), tile_grid_size_px=(3, 12), tile_grid_size_px_min=3),
                 iaa.contrast.GammaContrast(gamma=(0.6, 1.8)),
                 iaa.contrast.LogContrast(gain=(0.6, 1.4)),
                 iaa.BlendAlpha((0.2, 0.7), iaa.contrast.AllChannelsHistogramEqualization()),
                 iaa.BlendAlpha((0.2, 0.7), iaa.contrast.HistogramEqualization()),
-                iaa.blur.BilateralBlur(d=(1, 7), sigma_color=(10, 250), sigma_space=(10, 250)),
                 iaa.blur.GaussianBlur(sigma=(0.0, 2.5)),
-                iaa.pillike.Solarize(p=1.0, threshold=128),
-                iaa.pillike.EnhanceColor(factor=(0.5, 1.5)),
                 iaa.pillike.EnhanceContrast(factor=(0.5, 1.5)),
                 iaa.pillike.EnhanceBrightness(factor=(0.5, 1.5)),
                 iaa.pillike.EnhanceSharpness(factor=(0.5, 1.5)),
@@ -225,6 +185,7 @@ class IdDataset(torch.utils.data.Dataset):
         new_id_lines = defaultdict(list)
 
         for cluster_id in self.id_lines.keys():
+
             # ignore IDs that do not have enough samples
             if len(self.id_lines[cluster_id]) >= min_id_size:
                 shuffled_names = self.id_lines[cluster_id][:]
@@ -285,10 +246,6 @@ class IdDataset(torch.utils.data.Dataset):
             int: Number of IDs.
         """
 
-        if self.page:
-            return len(self.id_lines.keys())
-
-        # in normal mode, labels are expected to be integer IDs
         return np.max(list(self.id_lines)) + 1
 
     def __len__(self) -> int:
@@ -302,19 +259,16 @@ class IdDataset(torch.utils.data.Dataset):
 
         return len(self.lines)
 
-    def _read_line(self, name: str) -> np.ndarray | list | None:
+    def _read_line(self, name: str) -> np.ndarray | None:
 
         """
         Load image from LMDB and convert it to numpy array.
-
-        In non-page mode: returns a single image
-        In page mode: returns a list of overlapping windows
 
         Parameters:
             name (str): key of the image inside LMDB
 
         Returns:
-            numpy.ndarray | list | None: Loaded image or list of page windows.
+            np.ndarray | None: Loaded image of shape (H, W, C) or None if loading fails.
         """
 
         self._ensure_lmdb_open()
@@ -325,95 +279,28 @@ class IdDataset(torch.utils.data.Dataset):
             logger.warning(f"Unable to load image '{name}' specified in '{self.file_name}' from DB '{self.lmdb_path}'.")
             return None
 
-        image = cv2.imdecode(np.frombuffer(data, dtype=np.uint8), cv2.IMREAD_COLOR)
+        image = cv2.imdecode(np.frombuffer(data, dtype=np.uint8), cv2.IMREAD_GRAYSCALE)
 
         if image is None:
             logger.warning(f"Unable to decode image '{name}'.")
             return None
 
-        if not self.page:
-            return self._prepare_single_image(image)
-
-        return self._prepare_page_images(image)
-
-    def _prepare_single_image(self, image: np.ndarray) -> np.ndarray:
-
-        """
-        Crop or pad one image to fixed width.
-
-        Parameters:
-            image (numpy.ndarray): Input image.
-
-        Returns:
-            numpy.ndarray: Processed image.
-        """
-        if image.shape[1] > self.width:
-
-            if self.test:
-                # in test mode use center crop so output is deterministic
-                pos = image.shape[1] // 2 - self.width // 2
-
-            else:
-                # in training use random crop as mild augmentation.
-                pos = np.random.randint(0, image.shape[1] - self.width + 1)
-
-            image = image[:, pos:][:, :self.width]
-
-        elif image.shape[1] < self.width:
-            # pad narrower images so all samples have equal width
-            padded = np.zeros((image.shape[0], self.width, 3), dtype=np.uint8)
-            padded[:, :image.shape[1]] = image
-            image = padded
+        # expand to (H, W, 1) so patchers receive 3D input
+        image = np.expand_dims(image, axis=-1)
 
         return image
 
-    def _prepare_page_images(self, image: np.ndarray) -> list:
-
-        """
-        Split a wide page image into overlapping windows
-
-        Parameters:
-            image (numpy.ndarray): Input page image.
-
-        Returns:
-            list: List of fixed-width image windows.
-        """
-
-        if image.shape[1] > self.width:
-            images = []
-            pos = 0
-
-            while True:
-                new_image = image[:, pos:pos + self.width]
-                images.append(new_image)
-
-                if pos == image.shape[1] - self.width:
-                    break
-
-                # move with overlap so page content is not skipped.
-                pos = min(pos + 50, image.shape[1] - self.width)
-
-        elif image.shape[1] < self.width:
-            padded = np.zeros((image.shape[0], self.width, 3), dtype=np.uint8)
-            padded[:, :image.shape[1]] = image
-            images = [padded]
-
-        else:
-            images = [image]
-
-        return images
-
-    def get_single_id_lines(self, idx: int | str, line_count: int = 32) -> np.ndarray | None:
+    def get_single_id_lines(self, idx: int, line_count: int = 32) -> list[np.ndarray] | None:
 
         """
         Load a random subset of images for one ID.
 
         Parameters:
-            idx (int | str): Cluster ID or page ID.
+            idx (int): Cluster ID.
             line_count (int): Maximum number of images to load
 
         Returns:
-            numpy.ndarray | None: stacked images or None.
+            list[np.ndarray] | None: List of images or None.
         """
 
         if idx not in self.id_lines:
@@ -431,111 +318,46 @@ class IdDataset(torch.utils.data.Dataset):
         if not images:
             return None
 
-        images = np.stack(images, axis=0)
-
         return images
 
-    def get_single_id_all_lines(self, idx: int | str) -> np.ndarray:
+    def get_single_id_all_lines(self, idx: int) -> list[np.ndarray]:
 
         """
         Load all images belonging to one ID
 
         Parameters:
-            idx (int | str): Cluster ID or page ID.
+            idx (int): Cluster ID.
 
         Returns:
-            numpy.ndarray: Stacked images.
+            list[np.ndarray]: List of images.
         """
 
-        if self.page:
-            images = []
+        images = [self._read_line(line_name) for line_name in self.id_lines[idx]]
+        images = [img for img in images if img is not None]
 
-            for line_id in self.id_lines[idx]:
-                image = self._read_line(line_id)
-
-                # in page mode one line can produce multiple windows, so extend the list with all returned windows.
-                if image is not None:
-                    images += image
-
-            if len(images) == 0:
-                raise ValueError(f"No images for page id: {idx}")
-
-            images = np.stack(images, axis=0)
-
-        else:
-            images = [self._read_line(line_name) for line_name in self.id_lines[idx]]
-            images = [img for img in images if img is not None]
-
-            if len(images) == 0:
-                raise ValueError(f"No images could be loaded for id: {idx}")
-
-            images = np.stack(images, axis=0)
+        if len(images) == 0:
+            raise ValueError(f"No images could be loaded for id: {idx}")
 
         return images
-
-    @staticmethod
-    def convert_line_id_to_page_id(line_id: str) -> str:
-
-        """
-        Convert a line ID into a page ID.
-
-        Parameters:
-            line_id (str): Line identifier.
-
-        Returns:
-            str: Page identifier.
-        """
-
-        not_uuid_pattern = re.compile(r"r\d+-l\d+\.jpg$")
-
-        if not_uuid_pattern.search(line_id):
-            # for non-UUID naming, remove the trailing row/line suffix.
-            page_id = "-".join(line_id.split("-")[:-2])
-
-        else:
-            # for UUID naming, the first UUID is treated as page ID.
-            line_id_without_extension = line_id[:-4]
-            splits = line_id_without_extension.split("-")
-
-            uuid_1 = "-".join(splits[:5])
-            uuid_2 = "-".join(splits[5:])
-
-            try:
-                uuid.UUID(uuid_1)
-            except ValueError:
-                logger.warning(f"Invalid UUID: {uuid_1} in line_id: {line_id}")
-
-            try:
-                uuid.UUID(uuid_2)
-            except ValueError:
-                logger.warning(f"Invalid UUID: {uuid_2} in line_id: {line_id}")
-
-            page_id = uuid_1
-
-        return page_id
 
     def get_original_image1(self, idx: int) -> torch.Tensor:
 
         """
-        Get an original image in full, without it being patched (augmentation and transforms are still not skipped only patching method)
+        Get an original image in full, without it being patched (augmentation is still applied).
 
         Parameters:
             idx (int): Dataset index.
 
         Returns:
-            torch.Tensor: Original image without it being patched.
+            torch.Tensor: Original image tensor of shape (C, H, W).
         """
 
         image = self._read_line(self.lines[idx][1])
 
-        if self.page:
-            image = image[0]
-
         if self.aug is not None:
             image = self.aug(images=[image])[0]
 
-        if self.transform:
-            image = self.transform(image)
+        image = torch.from_numpy(image.transpose(2, 0, 1).copy()).float().div_(255.0)
 
         return image
 
@@ -549,18 +371,13 @@ class IdDataset(torch.utils.data.Dataset):
 
         Returns:
             tuple[torch.Tensor, torch.Tensor, int]: (image_1, image_2, line_cluster_id)
-
-        Raises:
-            ValueError: when no transform is provided for the patches of each image
         """
 
         image_1 = self._read_line(self.lines[idx][1])
         line_cluster_id = self.lines[idx][0]
 
         if image_1 is None:
-            raise RuntimeError(
-                f"Failed to load image '{self.lines[idx][1]}' (index {idx}) from LMDB '{self.lmdb_path}'."
-            )
+            raise RuntimeError(f"Failed to load image '{self.lines[idx][1]}' (index {idx}) from LMDB '{self.lmdb_path}'.")
 
         # pick another sample from the same class to create a positive pair.
         line_name = np.random.choice(self.id_lines[line_cluster_id])
@@ -571,12 +388,6 @@ class IdDataset(torch.utils.data.Dataset):
                 f"Failed to load image '{line_name}' (positive pair for index {idx}) from LMDB '{self.lmdb_path}'."
             )
 
-        if self.page:
-            # in page mode _read_line returns a list of windows
-            # original behavior uses only the first window
-            image_1 = image_1[0]
-            image_2 = image_2[0]
-
         if self.aug is not None:
             image_1, image_2 = self.aug(images=[image_1, image_2])
 
@@ -584,12 +395,9 @@ class IdDataset(torch.utils.data.Dataset):
         image_1 = self.patcher.extract_patches(image_1)
         image_2 = self.patcher.extract_patches(image_2)
 
-        if self.transform is None:
-            raise ValueError("transform must be provided when using patched images.")
-
-        # convert each patch separately: (N, H, W, C) -> (N, C, H, W)
-        image_1 = torch.stack([self.transform(patch) for patch in image_1], dim=0)
-        image_2 = torch.stack([self.transform(patch) for patch in image_2], dim=0)
+        # convert numpy to tensor, scaled to [0, 1]
+        image_1 = torch.from_numpy(image_1.transpose(0, 3, 1, 2).copy()).float().div_(255.0)
+        image_2 = torch.from_numpy(image_2.transpose(0, 3, 1, 2).copy()).float().div_(255.0)
 
         return image_1, image_2, line_cluster_id
 

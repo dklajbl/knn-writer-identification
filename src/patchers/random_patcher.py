@@ -1,7 +1,7 @@
 import numpy as np
 from src.patchers.base_patcher import BasePatcher
 from src.patchers.patcher_config import PatcherConfig
-from src.patchers.utils import is_empty_or_padded_patch, normalize_patch_size
+from src.patchers.utils import normalize_patch_size
 
 
 class RandomPatcher(BasePatcher):
@@ -12,9 +12,8 @@ class RandomPatcher(BasePatcher):
     This patcher extracts exactly "patch_count" random patches of fixed size (patch_height, patch_width) from the input image.
 
     Behavior:
-        1. First, it tries to collect random patches while skipping empty/padded ones.
-        2. If the number of valid patches is still insufficient after a fixed number of attempts,
-           it fills the remaining with random patches without checking whether they are empty.
+        1. Generates all coordinates at once (vectorized RNG).
+        2. Extracts all patches in bulk via numpy advanced indexing.
 
     Main properties:
         - returns exactly `patch_count` patches
@@ -44,43 +43,6 @@ class RandomPatcher(BasePatcher):
         if self.patch_height <= 0 or self.patch_width <= 0:
             raise ValueError("patch_height and patch_width must be > 0")
 
-    def _extract_random_patch(
-        self,
-        image: np.ndarray,
-        crop_height: int,
-        crop_width: int,
-        max_y: int,
-        max_x: int,
-        skip_empty: bool = True,
-    ) -> np.ndarray | None:
-
-        """
-        Extract one random patch from the image.
-
-        Parameters:
-            image (np.ndarray): Input image of shape (H, W, C).
-            crop_height (int): Crop height before optional resizing.
-            crop_width (int): Crop width before optional resizing.
-            max_y (int): Maximum valid top-left y-coordinate.
-            max_x (int): Maximum valid top-left x-coordinate.
-            skip_empty (bool): If True, reject empty/padded patches and return None.
-
-        Returns:
-            np.ndarray | None: valid patch if extraction succeeds or return None if skip_empty=True and the patch is rejected
-        """
-
-        y = self.rng.integers(0, max_y + 1) if max_y > 0 else 0
-        x = self.rng.integers(0, max_x + 1) if max_x > 0 else 0
-
-        patch = image[y:y + crop_height, x:x + crop_width]
-
-        if skip_empty and is_empty_or_padded_patch(patch):
-            return None
-
-        patch = normalize_patch_size(patch, self.patch_height, self.patch_width, self.interpolation)
-
-        return patch
-
     def extract_patches(self, image: np.ndarray) -> np.ndarray:
 
         """
@@ -106,45 +68,29 @@ class RandomPatcher(BasePatcher):
         if self.patch_count == 1:
             return np.expand_dims(image, axis=0)
 
-        img_height, img_width, _ = image.shape
+        img_height, img_width, channels = image.shape
 
         # if the requested patch is larger than the image - crop what is available and resize to the target size
-        crop_height = min(self.patch_height, img_height)
-        crop_width = min(self.patch_width, img_width)
+        crop_height, crop_width = min(self.patch_height, img_height), min(self.patch_width, img_width)
 
-        max_y = max(0, img_height - crop_height)
-        max_x = max(0, img_width - crop_width)
+        max_top, max_left = max(0, img_height - crop_height), max(0, img_width - crop_width)
+        needs_resize = (crop_height != self.patch_height or crop_width != self.patch_width)
 
-        patches = []  # final random patches
+        # generate all coordinates at once (vectorized RNG instead of per-patch calls)
+        patch_tops = self.rng.integers(0, max_top + 1, size=self.patch_count) if max_top > 0 else np.zeros(self.patch_count, dtype=np.int64)
+        patch_lefts = self.rng.integers(0, max_left + 1, size=self.patch_count) if max_left > 0 else np.zeros(self.patch_count, dtype=np.int64)
 
-        # try to collect valid non-empty patches
-        max_attempts = self.patch_count * 20
-        attempts = 0
+        # extract all patches via numpy indexing
+        row_offsets, col_offsets = np.arange(crop_height), np.arange(crop_width)
+        row_indices = patch_tops[:, None] + row_offsets[None, :]   # (patch_count, crop_height)
+        col_indices = patch_lefts[:, None] + col_offsets[None, :]  # (patch_count, crop_width)
+        patches = image[row_indices[:, :, None], col_indices[:, None, :], :]  # (patch_count, crop_height, crop_width, channels)
 
-        while len(patches) < self.patch_count and attempts < max_attempts:
-            attempts += 1
+        # resize only when image is smaller than requested patch size (rare edge case)
+        if needs_resize:
+            resized_patches = np.empty((self.patch_count, self.patch_height, self.patch_width, channels), dtype=patches.dtype)
+            for i in range(self.patch_count):
+                resized_patches[i] = normalize_patch_size(patches[i], self.patch_height, self.patch_width, self.interpolation)
+            patches = resized_patches
 
-            patch = self._extract_random_patch(
-                image=image,
-                crop_height=crop_height,
-                crop_width=crop_width,
-                max_y=max_y,
-                max_x=max_x,
-                skip_empty=True,
-            )
-            if patch is not None:  # patch has not been rejected
-                patches.append(patch)
-
-        # if there are still not enough patches, fill the rest without checking whether the patches are empty
-        while len(patches) < self.patch_count:
-            patch = self._extract_random_patch(
-                image=image,
-                crop_height=crop_height,
-                crop_width=crop_width,
-                max_y=max_y,
-                max_x=max_x,
-                skip_empty=False,
-            )
-            patches.append(patch)
-
-        return np.stack(patches, axis=0)
+        return patches

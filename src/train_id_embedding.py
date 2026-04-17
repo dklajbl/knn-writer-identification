@@ -9,7 +9,6 @@ import numpy as np
 np.bool = bool
 
 import torch
-import torchvision
 from torch.utils.data import DataLoader
 
 from pytorch_metric_learning import losses
@@ -81,8 +80,6 @@ def parse_args() -> argparse.Namespace:
         help="Patch width in pixels used by all patchers."
     )
 
-    parser.add_argument("--width", type=int, default=320)
-
     parser.add_argument("--start-iteration", default=0, type=int)
     parser.add_argument("--epochs", default=30, type=int)
     parser.add_argument(
@@ -111,6 +108,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--out-checkpoints-dir", default='.', type=str)
     parser.add_argument("--show-dir", default='.', type=str)
 
+    parser.add_argument("--num-workers", default=4, type=int, help="Number of DataLoader worker processes.")
     parser.add_argument("--eval-on-start", action="store_true")
     parser.add_argument("--logging-level", default="INFO")
 
@@ -126,9 +124,7 @@ def configure_logging(logging_level: str) -> None:
         logging_level (str): Logging level as string.
     """
 
-    log_formatter = logging.Formatter(
-        "%(asctime)s - %(filename)s - %(levelname)s - %(message)s"
-    )
+    log_formatter = logging.Formatter("%(asctime)s - %(filename)s - %(levelname)s - %(message)s")
     log_formatter.converter = time.gmtime
 
     handler = logging.StreamHandler(sys.stdout)
@@ -178,7 +174,7 @@ def create_model(args, device: torch.device) -> torch.nn.Module:
     """
 
     image_encoder = WriterIdentificationEncoder(
-        in_channels=3,
+        in_channels=1,
         hidden_dim=256,
         embed_dim=args.embed_dim,
         nhead=8,
@@ -189,14 +185,9 @@ def create_model(args, device: torch.device) -> torch.nn.Module:
     ).to(device)
 
     if args.start_iteration > 0:
-        checkpoint_path = os.path.join(
-            args.out_checkpoints_dir,
-            f"cp-{args.start_iteration:07d}.img.ckpt"
-        )
+        checkpoint_path = os.path.join(args.out_checkpoints_dir, f"cp-{args.start_iteration:07d}.img.ckpt")
         logger.info(f"Loading image checkpoint {checkpoint_path}")
-        image_encoder.load_state_dict(
-            torch.load(checkpoint_path, map_location=device)
-        )
+        image_encoder.load_state_dict(torch.load(checkpoint_path, map_location=device))
 
     return image_encoder
 
@@ -212,8 +203,6 @@ def create_dataloaders(args) -> tuple[DataLoader, DataLoader, DataLoader | None]
     Returns:
         tuple[DataLoader, DataLoader | None]: Training dataloader and testing dataloader.
     """
-
-    transform = torchvision.transforms.ToTensor()
 
     # make patcher config
     patcher_config = PatcherConfig(
@@ -232,41 +221,36 @@ def create_dataloaders(args) -> tuple[DataLoader, DataLoader, DataLoader | None]
     train_dataset = IdDataset(
         args.gt_file,
         args.lmdb,
-        transform=transform,
         augment=True,
-        width=args.width,
         patcher_config=patcher_config
     )
     train_dataloader = DataLoader(
         train_dataset,
-        num_workers=1,
+        num_workers=args.num_workers,
         batch_size=args.batch_size,
         shuffle=True,
         drop_last=True,
         collate_fn=collate_fn,
         pin_memory=True,
-        persistent_workers=True,
-        prefetch_factor=4,
+        persistent_workers=args.num_workers > 0,
+        prefetch_factor=4 if args.num_workers > 0 else None,
     )
 
     gallery_dataloader = None
     query_dataloader = None
 
     if args.gt_file_gallery and args.gt_file_query:
-        # testing dataset disables augmentation and uses deterministic cropping
         gallery_dataset = IdDataset(
             args.gt_file_gallery,
             args.lmdb,
-            transform=transform,
             augment=False,
             restrict_data=False,
             test=True,
-            width=args.width,
             patcher_config=patcher_config
         )
         gallery_dataloader = DataLoader(
             gallery_dataset,
-            num_workers=1,
+            num_workers=args.num_workers,
             batch_size=args.batch_size,
             shuffle=False,
             drop_last=False,
@@ -276,16 +260,14 @@ def create_dataloaders(args) -> tuple[DataLoader, DataLoader, DataLoader | None]
         query_dataset = IdDataset(
             args.gt_file_query,
             args.lmdb,
-            transform=transform,
             augment=False,
             restrict_data=False,
             test=True,
-            width=args.width,
             patcher_config=patcher_config
         )
         query_dataloader = DataLoader(
             query_dataset,
-            num_workers=1,
+            num_workers=args.num_workers,
             batch_size=args.batch_size,
             shuffle=False,
             drop_last=False,
@@ -369,7 +351,7 @@ def train_one_step(
     images_2: torch.Tensor,
     labels: torch.Tensor,
     device: torch.device,
-    scaler: torch.cuda.amp.GradScaler,
+    scaler: torch.cuda.amp.GradScaler | None,
     mask_1: torch.Tensor | None = None,
     mask_2: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, float]:
@@ -392,7 +374,7 @@ def train_one_step(
         images_2 (torch.Tensor): Second batch of patched images.
         labels (torch.Tensor): Batch labels.
         device (torch.device): Computation device.
-        scaler (torch.cuda.amp.GradScaler): Gradient scaler for mixed precision training.
+        scaler (torch.cuda.amp.GradScaler, optional): Gradient scaler for mixed precision training.
         mask_1 (torch.Tensor, optional, default=None): Padding mask for images_1. True = padded position to ignore.
             Used when the grid patcher produces variable patch counts per image.
         mask_2 (torch.Tensor, optional, default=None): Padding mask for images_2. Same convention as mask_1.
@@ -690,7 +672,7 @@ def main() -> None:
     """
     Main training entry point.
     """
-    start_time = time.time()
+
     args = parse_args()
 
     configure_logging(args.logging_level)
@@ -707,7 +689,9 @@ def main() -> None:
     # show_dir_heat_maps_path, show_dir_tsne_path, show_dir_retrieval_path = ensure_directories(args)
 
     image_encoder = create_model(args, device)
-    image_encoder = torch.compile(image_encoder, mode="default")
+
+    # (no compile)
+    # image_encoder = torch.compile(image_encoder, mode="default")
 
     train_dataloader, gallery_dataloader, query_dataloader = create_dataloaders(args)
 
@@ -717,13 +701,9 @@ def main() -> None:
         weight_decay=args.weight_decay
     )
 
-    loss_history = [0.0] * args.start_iteration
-    iteration = args.start_iteration
-    last_view_iteration = args.start_iteration
-
     loss_object = losses.NTXentLoss(temperature=args.temperature)
 
-    scaler = torch.amp.GradScaler('cuda')
+    scaler = torch.amp.GradScaler("cuda") if device.type == "cuda" else None
 
     epoch = 0
 
@@ -736,6 +716,7 @@ def main() -> None:
         image_encoder.train()
 
         for batch in train_dataloader:
+
             # grid patcher returns 5-tuple (with padding masks), random/sift return 3-tuple
             if len(batch) == 5:
                 images_1, images_2, labels, mask_1, mask_2 = batch
@@ -760,7 +741,6 @@ def main() -> None:
                 mask_2=mask_2,
             )
             if loss_value:
-                loss_history.append(loss_value)
                 epoch_loss_sum += loss_value
                 epoch_steps += 1
 
@@ -774,7 +754,7 @@ def main() -> None:
                 device=device,
             )
             logger.info(
-                f"CSI METRICS {iteration}: "
+                f"CSI METRICS epoch {epoch}: "
                 + " ".join(
                     f"{k}:{v}"
                     for k, v in [
@@ -787,14 +767,14 @@ def main() -> None:
                 )
             )
             logger.info(
-                f"OSI METRICS {iteration}:\n"
+                f"OSI METRICS epoch {epoch}:\n"
                 + "\n".join(
                     f"{k}: {v}" for k, v in metrics.osi_metrics.main_fpir_op_points.items()
                 )
             )
 
         epoch_time = time.time() - epoch_start
-        avg_loss = epoch_loss_sum / (epoch_steps + 1)
+        avg_loss = epoch_loss_sum / max(epoch_steps, 1)
         logger.info(f"Epoch {epoch} | avg loss: {avg_loss:.4f} | time: {epoch_time:.1f}s")
 
         if epoch >= args.epochs:

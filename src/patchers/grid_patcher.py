@@ -9,12 +9,12 @@ class GridPatcher(BasePatcher):
     """
     Fixed-size sliding window patcher for text and document images.
 
-    Extracts patches of a fixed size (patch_height x patch_width) in reading order:
-        left-to-right within each row, top-to-bottom across rows.
+    Extracts patches of a fixed size (patch_height x patch_width) in reading order: left-to-right within each row, top-to-bottom across rows.
 
     Unlike the random and SIFT patchers, the grid patcher does not use a fixed patch_count.
-    Instead, it extracts as many patches as fit within the image. Partial edge patches (at the right or bottom border)
-    are included and resized to the target dimensions if their remaining extent is at least min_partial_ratio of the full patch dimension.
+    Instead, it extracts as many patches as fit within the image.
+
+    Partial edge patches (at the right or bottom border) are included and resized to the target dimensions if their remaining extent is at least min_partial_ratio of the full patch dimension.
     Strips thinner than that threshold are skipped to avoid heavy interpolation artifacts.
 
     The variable patch count per image is handled downstream by a custom collate function that pads batches to the maximum count and produces a padding mask.
@@ -48,8 +48,7 @@ class GridPatcher(BasePatcher):
             image (np.ndarray): input image as a NumPy array with shape (H, W, C).
 
         Returns:
-            np.ndarray: extracted patches with shape (N, patch_height, patch_width, C),
-                where N is the number of patches that fit in this image.
+            np.ndarray: extracted patches with shape (N, patch_height, patch_width, C), where N is the number of patches that fit in this image.
 
         Raises:
             ValueError: if the input image is None, has wrong dimensions, or yields no patches.
@@ -65,48 +64,63 @@ class GridPatcher(BasePatcher):
         if self.patch_count == 1:
             return np.expand_dims(image, axis=0)
 
-        img_h, img_w, _ = image.shape
+        img_height, img_width, channels = image.shape
+        patch_height, patch_width = self.patch_height, self.patch_width
 
         # minimum pixel extent for an edge remainder to be kept as a partial patch
-        min_h = self.patch_height * self.min_partial_ratio
-        min_w = self.patch_width * self.min_partial_ratio
+        min_partial_height = patch_height * self.min_partial_ratio
+        min_partial_width = patch_width * self.min_partial_ratio
+
+        # how many full-size patches fit in each direction
+        num_full_rows = img_height // patch_height
+        num_full_cols = img_width // patch_width
+        remaining_height = img_height - num_full_rows * patch_height
+        remaining_width = img_width - num_full_cols * patch_width
+
+        has_partial_bottom = remaining_height >= min_partial_height
+        has_partial_right = remaining_width >= min_partial_width
+
+        # extract all full interior patches using reshape
+        full_grid = None
+        if num_full_rows > 0 and num_full_cols > 0:
+            full_region = image[:num_full_rows * patch_height, :num_full_cols * patch_width, :].copy()
+            full_grid = full_region.reshape(
+                num_full_rows, patch_height, num_full_cols, patch_width, channels
+            ).transpose(0, 2, 1, 3, 4)  # shape: (num_full_rows, num_full_cols, patch_height, patch_width, channels)
 
         patches: list[np.ndarray] = []
+        total_rows = num_full_rows + (1 if has_partial_bottom else 0)
 
-        # slide top-to-bottom in steps of patch_height
-        y = 0
-        while y < img_h:
-            remaining_h = img_h - y
+        for row in range(total_rows):
+            is_partial_row = (row >= num_full_rows)
 
-            if remaining_h < min_h:
-                # remaining strip is too thin to be useful - stop iterating rows
-                break
+            if not is_partial_row and full_grid is not None:
+                # bulk-append all full patches in this row (no resize needed)
+                patches.append(full_grid[row])  # (num_full_cols, patch_height, patch_width, channels)
 
-            actual_h = min(self.patch_height, remaining_h)
+            elif is_partial_row:
+                # bottom partial row: extract and resize each column patch
 
-            # slide left-to-right in steps of patch_width
-            x = 0
-            while x < img_w:
-                remaining_w = img_w - x
+                top = num_full_rows * patch_height
+                for col in range(num_full_cols):
+                    left = col * patch_width
+                    patch = image[top:, left:left + patch_width, :]
+                    patches.append(normalize_patch_size(patch, patch_height, patch_width, self.interpolation)[np.newaxis])
 
-                if remaining_w < min_w:
-                    # remaining strip is too narrow - skip to next row
-                    break
+            # right edge partial patch for this row (resize needed)
+            if has_partial_right:
+                left = num_full_cols * patch_width
 
-                actual_w = min(self.patch_width, remaining_w)
+                if is_partial_row:
+                    top = num_full_rows * patch_height
+                    patch = image[top:, left:, :]
+                else:
+                    top = row * patch_height
+                    patch = image[top:top + patch_height, left:, :]
 
-                # extract the patch (full or partial edge patch)
-                patch = image[y:y + actual_h, x:x + actual_w]
-
-                # resize to the target dimensions (no-op for full patches that already match)
-                patch = normalize_patch_size(patch, self.patch_height, self.patch_width, self.interpolation)
-                patches.append(patch)
-
-                x += self.patch_width
-
-            y += self.patch_height
+                patches.append(normalize_patch_size(patch, patch_height, patch_width, self.interpolation)[np.newaxis])
 
         if len(patches) == 0:
             raise ValueError("No patches could be extracted from the image.")
 
-        return np.stack(patches, axis=0)
+        return np.concatenate(patches, axis=0)

@@ -5,11 +5,6 @@ def pad_patches_collate(batch: list[tuple[torch.Tensor, torch.Tensor, int]]) -> 
 
     """
     Custom collate function that pads variable-length patch sequences to the maximum patch count in the batch and produces padding masks.
-
-    When different images produce different numbers of patches (e.g. the grid patcher
-    extracts as many fixed-size patches as fit), the default PyTorch collate fails because
-    it cannot stack tensors with different first dimensions.
-
     This collate pads shorter sequences with zero-filled patches and creates boolean masks so the model can ignore padded positions.
 
     Parameters:
@@ -47,7 +42,7 @@ def pad_patches_collate(batch: list[tuple[torch.Tensor, torch.Tensor, int]]) -> 
     padded_images_1 = torch.zeros(batch_size, max_patches, C, H, W)
     padded_images_2 = torch.zeros(batch_size, max_patches, C, H, W)
 
-    # masks: True where padded (following PyTorch transformer src_key_padding_mask convention)
+    # masks: True where padded
     mask_1 = torch.ones(batch_size, max_patches, dtype=torch.bool)
     mask_2 = torch.ones(batch_size, max_patches, dtype=torch.bool)
 

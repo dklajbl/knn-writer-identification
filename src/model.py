@@ -197,7 +197,7 @@ class WriterIdentificationEncoder(nn.Module):
 
     def __init__(
         self,
-        in_channels: int = 3,
+        in_channels: int = 1,
         hidden_dim: int = 256,
         embed_dim: int = 128,
         nhead: int = 8,
@@ -205,7 +205,7 @@ class WriterIdentificationEncoder(nn.Module):
         dim_feedforward: int = 1024,
         dropout: float = 0.1,
         use_positional_encoding: bool = False,
-        max_patches: int = 100,
+        max_patches: int = 500,
         num_pool_heads: int = 4,
     ) -> None:
 
@@ -213,7 +213,7 @@ class WriterIdentificationEncoder(nn.Module):
         Initialize the WriterIdentification encoder.
 
         Parameters:
-            in_channels (int, default=3): Number of input image channels.
+            in_channels (int, default=1): Number of input image channels.
             hidden_dim (int, default=256): Internal dimension shared by the CNN, the Transformer, and the attention pooling.
             embed_dim (int, default=128): Final output embedding dimension written into the metric space.
                                           Should be <= hidden_dim for a properly constrained projection. The user is expected to experiment with this value.
@@ -224,7 +224,7 @@ class WriterIdentificationEncoder(nn.Module):
             use_positional_encoding (bool, default=False): Whether to add sinusoidal positional encodings to the patch sequence before the Transformer.
                                                            Enable for grid-patching experiments where patches have a canonical spatial order.
                                                            Leave False for random and SIFT patches (no canonical order).
-            max_patches (int, default=100): Maximum expected patch count. Only used to pre-compute the positional encoding buffer when use_positional_encoding=True.
+            max_patches (int, default=500): Maximum expected patch count. Only used to pre-compute the positional encoding buffer when use_positional_encoding=True.
             num_pool_heads (int, default=4): Number of independent attention heads in MultiHeadAttentionPooling. Must divide hidden_dim evenly.
         """
 
@@ -300,6 +300,10 @@ class WriterIdentificationEncoder(nn.Module):
 
         # optional positional encoding (grid patching only)
         if self.use_positional_encoding:
+            assert N <= self.pe.size(0), (
+                f"N={N} exceeds max_patches={self.pe.size(0)}; "
+                f"raise max_patches or use larger patch size"
+            )
             x = x + self.pe[:N].unsqueeze(0)  # [1, N, hidden_dim] broadcast -> [B, N, hidden_dim]
 
         # Stage 2 - Cross-patch Transformer: every patch attends to every other patch
