@@ -1,11 +1,11 @@
-import logging
-
 import cv2
+import logging
 import numpy as np
 from src.patchers.base_patcher import BasePatcher
 from src.patchers.patcher_config import PatcherConfig
 from src.patchers.random_patcher import RandomPatcher
-from src.patchers.utils import is_empty_or_padded_patch, normalize_patch_size
+from src.patchers.utils import normalize_patch_size
+
 
 logger = logging.getLogger(__name__)
 
@@ -73,7 +73,7 @@ class SIFTPatcher(BasePatcher):
         self,
         image: np.ndarray,
         keypoint: cv2.KeyPoint,
-    ) -> np.ndarray | None:
+    ) -> np.ndarray:
 
         """
         Extract one fixed-size patch centered at a SIFT keypoint.
@@ -83,7 +83,7 @@ class SIFTPatcher(BasePatcher):
             keypoint (cv2.KeyPoint): SIFT keypoint.
 
         Returns:
-            np.ndarray | None: valid patch if extraction succeeds, None if the patch is empty/padded
+            np.ndarray: Extracted patch with shape (patch_height, patch_width, C).
         """
 
         img_height, img_width, _ = image.shape
@@ -99,12 +99,7 @@ class SIFTPatcher(BasePatcher):
         x1 = max(0, x_center - half_w)
         x2 = min(img_width, x_center + half_w)
 
-        # crop around SIFT keypoint - with specific crop window size
         patch = image[y1:y2, x1:x2]
-
-        if is_empty_or_padded_patch(patch):
-            return None
-
         patch = normalize_patch_size(patch, self.patch_height, self.patch_width, self.interpolation)
 
         return patch
@@ -134,9 +129,9 @@ class SIFTPatcher(BasePatcher):
         if self.patch_count == 1:
             return np.expand_dims(image, axis=0)
 
-        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        gray = image[:, :, 0]
 
-        keypoints, _ = self.sift.detectAndCompute(gray, None)
+        keypoints = self.sift.detect(gray, None)
 
         if keypoints is None:
             keypoints = []
@@ -144,19 +139,20 @@ class SIFTPatcher(BasePatcher):
         # sort from strongest to weakest
         keypoints = sorted(keypoints, key=lambda kp: kp.response, reverse=True)
 
+        if len(keypoints) == 0:
+            logger.warning("SIFT found no keypoints, falling back to random patcher.")
+            return self._random_fallback.extract_patches(image)
+
         patches = []
 
+        # extract each patch (where each keypoint is a center of the patch)
         for keypoint in keypoints:
+
             if len(patches) >= self.patch_count:
                 break
 
             patch = self._extract_patch_around_keypoint(image, keypoint)
-            if patch is not None:
-                patches.append(patch)
-
-        if len(patches) == 0:
-            logger.warning("SIFT found no valid patches, falling back to random patcher.")
-            return self._random_fallback.extract_patches(image)
+            patches.append(patch)
 
         if len(patches) < self.patch_count:
             # remaining patches (patch_count not satisfied) are filled with random ones
