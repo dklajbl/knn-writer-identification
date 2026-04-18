@@ -16,8 +16,11 @@ Filtering pipeline (applied in this order):
   7. Assign surviving authors to train / val / test by greedy sample-count
      balancing and write the output files.
   8. From test.txt, sample --gallery_query_k lines per author (default 25)
-     and write gallery.txt and query.txt with disjoint but equal-sized sets.
-     Authors with fewer than 2×k lines are skipped for these two files.
+     and write tst-gallery.txt and tst-query.txt with disjoint but equal-sized
+     sets. Authors with fewer than 2×k lines are skipped for these two files.
+  9. From val.txt, sample --gallery_query_k lines per author (default 25)
+     and write val-gallery.txt and val-query.txt with disjoint but equal-sized
+     sets. Authors with fewer than 2×k lines are skipped for these two files.
 
 Usage:
     python3 generate_splits.py \
@@ -32,7 +35,9 @@ Usage:
 
 Outputs (written to --output_dir):
     train.txt   val.txt   test.txt   stats.txt
-    gallery.txt   query.txt  (sampled from test authors, k samples each)
+    train_authors.txt   val_authors.txt   test_authors.txt  (one author ID per line)
+    tst-gallery.txt   tst-query.txt  (sampled from test authors, k samples each)
+    val-gallery.txt   val-query.txt  (sampled from val  authors, k samples each)
 """
 
 import argparse
@@ -54,7 +59,7 @@ def parse_args():
     parser.add_argument("--seed",       type=int,  default=42)
     parser.add_argument("--output_dir",       type=str, default=".",  help="Directory to store output files")
     parser.add_argument("--gallery_query_k",  type=int, default=25,
-                        help="Samples per author in gallery.txt and query.txt (drawn from test split, default 25)")
+                        help="Samples per author in gallery/query files (drawn from val and test splits, default 25)")
     return parser.parse_args()
 
 
@@ -198,6 +203,71 @@ def file_stats(path, author_counts, widths, heights):
         f"  Authors : {n:,}\n"
     )
     return header + three_col_stats(counts, widths, heights)
+
+
+def build_gallery_query(split_name, split_path, k, rng_seed, output_dir):
+    """Read a split file, then write <prefix>-gallery.txt and <prefix>-query.txt.
+
+    For each author with at least 2*k lines, draws 2*k distinct samples and
+    assigns the first half to gallery and the second half to query.
+
+    Parameters
+    ----------
+    split_name : str
+        Human-readable label used in printed output (e.g. "Test", "Val").
+    split_path : str
+        Path to the split file to read (e.g. "test.txt" or "val.txt").
+    k : int
+        Number of samples per author in each output file.
+    rng_seed : int
+        Seed for the sampling RNG (ensures reproducibility).
+    output_dir : str
+        Directory where output files are written.
+
+    Returns
+    -------
+    tuple[str, str]
+        Paths to the gallery and query files that were written.
+    """
+    prefix = "tst" if split_name.lower() == "test" else split_name.lower()
+    gallery_path = f"{output_dir}/{prefix}-gallery.txt"
+    query_path   = f"{output_dir}/{prefix}-query.txt"
+
+    lines_by_author: dict[str, list[str]] = defaultdict(list)
+    with open(split_path, "r", encoding="utf-8") as f:
+        for line in f:
+            parts = line.split()
+            if len(parts) >= 2:
+                lines_by_author[parts[1]].append(line)
+
+    gq_rng = random.Random(rng_seed)
+    gallery_lines: list[str] = []
+    query_lines:   list[str] = []
+    skipped_authors  = 0
+    included_authors = 0
+
+    for author, lines in sorted(lines_by_author.items()):
+        if len(lines) < 2 * k:
+            skipped_authors += 1
+            continue
+        sampled = gq_rng.sample(lines, 2 * k)
+        gallery_lines.extend(sampled[:k])   # indices 0..k-1
+        query_lines.extend(sampled[k:])     # indices k..2k-1 (disjoint from gallery)
+        included_authors += 1
+
+    with open(gallery_path, "w", encoding="utf-8") as fg, \
+         open(query_path,   "w", encoding="utf-8") as fq:
+        fg.writelines(gallery_lines)
+        fq.writelines(query_lines)
+
+    print(f"\n{split_name} Gallery / Query:")
+    print(f"  k (samples per author)                   : {k}")
+    print(f"  Authors included                         : {included_authors:,}")
+    print(f"  Authors skipped (< {2*k} {split_name.lower()} samples) : {skipped_authors:,}")
+    print(f"  Lines in {prefix}-gallery.txt             : {len(gallery_lines):,}")
+    print(f"  Lines in {prefix}-query.txt               : {len(query_lines):,}")
+
+    return gallery_path, query_path
 
 
 def main():
@@ -358,22 +428,27 @@ def main():
     print("\nPass 2: writing splits...")
 
     per_author = defaultdict(Counter)   # split -> {author: lines written}
-    author_written = Counter()          # author -> total lines written (used to enforce max_count)
+    author_written = Counter()          # author -> total lines written for val/test max_count cap
     split_widths  = defaultdict(list)   # split -> flat list of width  values (for stats)
     split_heights = defaultdict(list)   # split -> flat list of height values (for stats)
+
+    # Train lines are buffered per-author so they can later be written sorted
+    # by the order in train_authors.txt and without any max_count cap.
+    train_lines_by_author:   dict[str, list[str]] = defaultdict(list)
+    train_widths_by_author:  dict[str, list[int]] = defaultdict(list)
+    train_heights_by_author: dict[str, list[int]] = defaultdict(list)
 
     # Per-reason drop counters for Pass 2 (mirroring Pass 1 where applicable).
     p2_deleted_malformed   = 0  # fewer than 2 fields
     p2_deleted_width_min   = 0  # width absent or below --width_min
     p2_deleted_undersample = 0  # randomly discarded by per-file --ratios
     p2_deleted_min_count   = 0  # author absent from assignment (removed by min_count or max_authors)
-    p2_deleted_max_count   = 0  # author already reached --max_count written lines
+    p2_deleted_max_count   = 0  # author already reached --max_count written lines (val/test only)
 
-    with open(os.path.join(args.output_dir, "train.txt"), "w", encoding="utf-8") as f_train, \
-         open(os.path.join(args.output_dir, "val.txt"),   "w", encoding="utf-8") as f_val, \
-         open(os.path.join(args.output_dir, "test.txt"),  "w", encoding="utf-8") as f_test:
+    with open(os.path.join(args.output_dir, "val.txt"),  "w", encoding="utf-8") as f_val, \
+         open(os.path.join(args.output_dir, "test.txt"), "w", encoding="utf-8") as f_test:
 
-        handles = {"train": f_train, "val": f_val, "test": f_test}
+        handles = {"val": f_val, "test": f_test}
         processed = 0
 
         for path, ratio in zip(args.files, args.ratios):
@@ -418,19 +493,37 @@ def main():
                         p2_deleted_min_count += 1
                         continue
 
-                    # Enforce --max_count: stop writing once the author's cap is reached.
-                    if args.max_count is not None and author_written[author] >= args.max_count:
-                        p2_deleted_max_count += 1
-                        continue
-
                     split = assignment[author]
-                    handles[split].write(line)
-                    author_written[author] += 1
-                    per_author[split][author] += 1
-                    if width is not None:
-                        split_widths[split].append(width)
-                    if height is not None:
-                        split_heights[split].append(height)
+
+                    if split == "train":
+                        # Buffer all train lines — no max_count cap, sorted write later.
+                        train_lines_by_author[author].append(line)
+                        per_author["train"][author] += 1
+                        if width  is not None: train_widths_by_author[author].append(width)
+                        if height is not None: train_heights_by_author[author].append(height)
+                    else:
+                        # Enforce --max_count for val and test only.
+                        if args.max_count is not None and author_written[author] >= args.max_count:
+                            p2_deleted_max_count += 1
+                            continue
+                        handles[split].write(line)
+                        author_written[author] += 1
+                        per_author[split][author] += 1
+                        if width  is not None: split_widths[split].append(width)
+                        if height is not None: split_heights[split].append(height)
+
+    # --- Write train.txt sorted by author order (matches train_authors.txt) ---
+    # Authors are sorted lexicographically (same order written to train_authors.txt below).
+    # All lines for each author are written contiguously; no max_count cap is applied.
+    train_author_order = sorted(train_lines_by_author.keys())
+    with open(os.path.join(args.output_dir, "train.txt"), "w", encoding="utf-8") as f_train:
+        for author in train_author_order:
+            f_train.writelines(train_lines_by_author[author])
+
+    # Merge per-author train width/height lists into split_widths/heights for stats reporting.
+    for author in train_author_order:
+        split_widths["train"].extend(train_widths_by_author[author])
+        split_heights["train"].extend(train_heights_by_author[author])
 
     total_final = sum(sum(c.values()) for c in per_author.values())
     total_authors = sum(len(c) for c in per_author.values())
@@ -453,49 +546,46 @@ def main():
             split_widths[split], split_heights[split],
         ), end="")
 
-    # --- Build gallery.txt and query.txt from the test split ---
-    # Read test.txt back, group lines by author, then for each author that has
-    # at least 2*k lines draw two disjoint random samples of size k.
+    # --- Write per-split author ID lists ---
+    # Each file contains one author ID per line, sorted lexicographically.
+    # train_authors.txt reuses train_author_order (computed above) so the row
+    # order is guaranteed identical to the author block order in train.txt.
+    # val and test authors are sorted the same way for consistency.
+    author_order_by_split = {
+        "train": train_author_order,
+        "val":   sorted(per_author["val"].keys()),
+        "test":  sorted(per_author["test"].keys()),
+    }
+    for split in ("train", "val", "test"):
+        authors_path = os.path.join(args.output_dir, f"{split}_authors.txt")
+        ordered = author_order_by_split[split]
+        with open(authors_path, "w", encoding="utf-8") as fa:
+            fa.write("\n".join(ordered) + "\n" if ordered else "")
+        print(f"  {split}_authors.txt : {len(ordered):,} authors")
+
+    # --- Build gallery/query files from test and val splits ---
+    # Each split is handled by build_gallery_query(), which reads the split
+    # file, groups lines by author, and writes two disjoint k-sample files.
+    # A fresh seeded RNG is used per split so sampling is reproducible and
+    # independent of any RNG state left over from Pass 2.
     k = args.gallery_query_k
-    test_path = os.path.join(args.output_dir, "test.txt")
-    test_lines_by_author: dict[str, list[str]] = defaultdict(list)
-    with open(test_path, "r", encoding="utf-8") as f:
-        for line in f:
-            parts = line.split()
-            if len(parts) >= 2:
-                test_lines_by_author[parts[1]].append(line)
 
-    # Use a fresh seeded RNG so gallery/query sampling is reproducible
-    # independently of any RNG state left over from Pass 2.
-    gq_rng = random.Random(args.seed)
-    gallery_lines: list[str] = []
-    query_lines:   list[str] = []
-    skipped_authors = 0
-    included_authors = 0
-    # For each test author with enough lines, draw 2*k distinct samples
-    # and split them evenly: first half → gallery, second half → query.
-    for author, lines in sorted(test_lines_by_author.items()):
-        if len(lines) < 2 * k:
-            skipped_authors += 1
-            continue
-        sampled = gq_rng.sample(lines, 2 * k)
-        gallery_lines.extend(sampled[:k])   # indices 0..k-1
-        query_lines.extend(sampled[k:])     # indices k..2k-1 (disjoint from gallery)
-        included_authors += 1
+    build_gallery_query(
+        split_name="Test",
+        split_path=os.path.join(args.output_dir, "test.txt"),
+        k=k,
+        rng_seed=args.seed,
+        output_dir=args.output_dir,
+    )
 
-    gallery_path = os.path.join(args.output_dir, "gallery.txt")
-    query_path   = os.path.join(args.output_dir, "query.txt")
-    with open(gallery_path, "w", encoding="utf-8") as fg, \
-         open(query_path,   "w", encoding="utf-8") as fq:
-        fg.writelines(gallery_lines)
-        fq.writelines(query_lines)
-
-    print(f"\nGallery / Query:")
-    print(f"  k (samples per author) : {k}")
-    print(f"  Authors included       : {included_authors:,}")
-    print(f"  Authors skipped (< {2*k} test samples) : {skipped_authors:,}")
-    print(f"  Lines in gallery.txt   : {len(gallery_lines):,}")
-    print(f"  Lines in query.txt     : {len(query_lines):,}")
+    # Use a different seed offset for val so its sampling is independent of test.
+    build_gallery_query(
+        split_name="Val",
+        split_path=os.path.join(args.output_dir, "val.txt"),
+        k=k,
+        rng_seed=args.seed + 1,
+        output_dir=args.output_dir,
+    )
 
 
 if __name__ == "__main__":
