@@ -259,10 +259,19 @@ class IdDataset(torch.utils.data.Dataset):
 
         parsed_lines = [line.split()[:2] for line in raw_lines]
 
-        self.lines = [
+        raw_lines = [
             (int(parts[1]), parts[0])
             for parts in parsed_lines
             if len(parts) == 2
+        ]
+
+        # remap cluster_ids to contiguous 0-based indices
+        unique_ids = sorted(set(cluster_id for cluster_id, _ in raw_lines))
+        self._id_remap = {original: remapped for remapped, original in enumerate(unique_ids)}
+
+        self.lines = [
+            (self._id_remap[cluster_id], image_name)
+            for cluster_id, image_name in raw_lines
         ]
 
         for cluster_id, image_name in self.lines:
