@@ -334,6 +334,7 @@ def create_eval_dataloaders(args) -> tuple[DataLoader | None, DataLoader | None]
 def train_one_step(
     image_encoder: torch.nn.Module,
     optimizer: torch.optim.Optimizer,
+    loss_optimizer: torch.optim.Optimizer,
     loss_object,
     images_1: torch.Tensor,
     images_2: torch.Tensor,
@@ -356,6 +357,7 @@ def train_one_step(
     Parameters:
         image_encoder (torch.nn.Module): Encoder model.
         optimizer (torch.optim.Optimizer): Optimizer.
+        loss_optimizer (torch.optim.Optimizer):
         loss_object: Metric learning loss object.
         images_1 (torch.Tensor): First batch of patched images.
         images_2 (torch.Tensor): Second batch of patched images.
@@ -383,26 +385,33 @@ def train_one_step(
         padding_mask = torch.cat([mask_1, mask_2], dim=0).to(device)
 
     optimizer.zero_grad(set_to_none=True)
+    loss_optimizer.zero_grad(set_to_none=True)
 
     use_amp = device.type == "cuda"
 
-    autocast_context = (
-        torch.autocast(device_type="cuda", dtype=torch.float16)
-        if use_amp
-        else nullcontext()
-    )
-
-    with autocast_context:
-        embedding = image_encoder(images, padding_mask=padding_mask)
-        loss = loss_object(embedding, labels)
-
+    # encoder forward pass in float16
     if use_amp and scaler is not None:
+        with torch.autocast(device_type="cuda", dtype=torch.float16):
+            embedding = image_encoder(images, padding_mask=padding_mask)
+
+        # loss in float32 — ArcFace is not compatible with float16
+        loss = loss_object(embedding.float(), labels)
+
+        # backward through scaler (covers encoder gradients)
         scaler.scale(loss).backward()
+
+        # encoder step via scaler
         scaler.step(optimizer)
         scaler.update()
+
+        # proxy weights step without scaler — they live in float32 already
+        loss_optimizer.step()
     else:
+        embedding = image_encoder(images, padding_mask=padding_mask)
+        loss = loss_object(embedding, labels)
         loss.backward()
         optimizer.step()
+        loss_optimizer.step()
 
     return embedding, loss.item()
 
@@ -432,14 +441,24 @@ def main() -> None:
 
     gallery_dataloader, query_dataloader = create_eval_dataloaders(args)
 
+    loss_object = losses.ArcFaceLoss(
+        num_classes=len(train_dataset.id_lines),
+        embedding_size=args.embed_dim,
+        margin=28.6,
+        scale=64,
+    ).to(device)
+
+    loss_optimizer = torch.optim.AdamW(
+        loss_object.parameters(),
+        lr=args.learning_rate * 0.1,
+        weight_decay=args.weight_decay,
+    )
 
     optimizer = torch.optim.AdamW(
         image_encoder.parameters(),
         lr=args.learning_rate,
         weight_decay=args.weight_decay,
     )
-
-    loss_object = losses.NTXentLoss(temperature=args.temperature)
 
     scaler = torch.amp.GradScaler("cuda") if device.type == "cuda" else None
 
@@ -471,6 +490,7 @@ def main() -> None:
             embedding, loss_value = train_one_step(
                 image_encoder=image_encoder,
                 optimizer=optimizer,
+                loss_optimizer=loss_optimizer,
                 loss_object=loss_object,
                 images_1=images_1,  # shape: [batch_size, patch_count, channels, height, width]
                 images_2=images_2,
