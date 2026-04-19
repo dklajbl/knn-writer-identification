@@ -305,18 +305,18 @@ def _calc_OSI_thr_decision_stats(top1_labels: np.ndarray,
                                       known_rejected_counts=known_rejected_counts)
 
 
-def _calc_OSI_metrics(full_ranking_labels: np.ndarray,
-                      full_ranking_scores: np.ndarray,
+def _calc_OSI_metrics(class_labels_ranked: np.ndarray,
+                      class_scores_ranked: np.ndarray,
                       query_labels: np.ndarray):
     """
     Calculate open-set identification metrics.
 
     Parameters:
-        full_ranking_labels (np.ndarray, shape=(N_queries, N_labels), dtype=int):
-            All ranked predicted labels for each query.
+        class_labels_ranked (np.ndarray, shape=(N_queries, N_labels), dtype=int):
+            Ranked labels for each query.
 
-        full_ranking_scores (np.ndarray, shape=(N_queries, N_labels), dtype=np.float32):
-            Scores of all ranked predicted labels for each query.
+        class_scores_ranked (np.ndarray, shape=(N_queries, N_labels), dtype=np.float32):
+            Scores of ranked labels for each query (descending order).
 
         query_labels (np.ndarray, shape=(N_labels), dtype=int): Query labels (ground truth).
 
@@ -356,24 +356,24 @@ def _calc_OSI_metrics(full_ranking_labels: np.ndarray,
 
     # STEP 3: Remove unknown labels and their scores from ranking
 
-    # create boolean mask over full_ranking_labels 2D array,
+    # create boolean mask over class_labels_ranked 2D array,
     #   where True indicates that the label is known
     # (N_queries, N_labels)
-    known_mask = ~np.isin(full_ranking_labels, unknown_labels)
+    known_mask = ~np.isin(class_labels_ranked, unknown_labels)
 
     # remove unknown labels and their scores
-    # (N_queries, N_labels) = full_ranking_labels
-    # (N_queries * (N_labels - N_labels_unknown)) = full_ranking_labels[mask]  (boolean indexing flattens array)
-    # (N_queries, N_labels - N_labels_unknown) = full_ranking_labels[mask].reshape(N_queries, -1)
-    full_ranking_labels_k = full_ranking_labels[known_mask].reshape(
+    # (N_queries, N_labels) = class_labels_ranked
+    # (N_queries * (N_labels - N_labels_unknown)) = class_labels_ranked[mask]  (boolean indexing flattens array)
+    # (N_queries, N_labels - N_labels_unknown) = class_labels_ranked[mask].reshape(N_queries, -1)
+    class_labels_ranked_k = class_labels_ranked[known_mask].reshape(
         N_queries, -1)
-    full_ranking_scores_k = full_ranking_scores[known_mask].reshape(
+    class_scores_ranked_k = class_scores_ranked[known_mask].reshape(
         N_queries, -1)
 
     # get top 1 predicted labels and their scores
     # (N_queries)
-    top1_labels = full_ranking_labels_k[:, 0]
-    top1_scores = full_ranking_scores_k[:, 0]
+    top1_labels = class_labels_ranked_k[:, 0]
+    top1_scores = class_scores_ranked_k[:, 0]
 
     # STEP 4: Calculate per threshold decision query count statistics
     thr_stats = _calc_OSI_thr_decision_stats(top1_labels, top1_scores,

@@ -96,6 +96,14 @@ class CSI_Metrics:
     Stores closed-set identification metrics.
     """
 
+    # Mean Average Precision
+    # mAP = (1 / num. queries) * sum over AP_q for each query
+    # AP_q = average percision of query q =
+    #   = (1 / num. relevant items for query)
+    #       * (sum over precision@k for each rank)
+    # precision@k = (num. relevant items in top k) / k
+    mAP: np.float32
+
     # Cummulative Match Characteristics.
     # Accuracy for each possible rank [1, N_labels].
     # Accuracy for rank K =
