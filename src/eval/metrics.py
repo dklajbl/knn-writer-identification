@@ -9,11 +9,11 @@ class OSI_OSCR_Curve:
     """ OSCR: TPIR x FPIR """
 
     x_fpir: np.ndarray
+
     y_tpir: np.ndarray
     y_thr: np.ndarray
     auc: np.float32
 
-    x_fpir_std: np.ndarray
     y_tpir_std: np.ndarray
     y_thr_std: np.ndarray
     auc_std: np.float32
@@ -24,11 +24,11 @@ class OSI_ROC_Curve:
     """ ROC: TPR x FPR(FPIR) """
 
     x_fpr: np.ndarray
+
     y_tpr: np.ndarray
     y_thr: np.ndarray
     auc: np.float32
 
-    x_fpr_std: np.ndarray
     y_tpr_std: np.ndarray
     y_thr_std: np.ndarray
     auc_std: np.float32
@@ -39,11 +39,11 @@ class OSI_DET_Curve:
     """ DET: FNR(FNIR) x FPR """
 
     x_fpr: np.ndarray
+
     y_fnr: np.ndarray
     y_thr: np.ndarray
     auc: np.float32
 
-    x_fpr_std: np.ndarray
     y_fnr_std: np.ndarray
     y_thr_std: np.ndarray
     auc_std: np.float32

@@ -1,6 +1,7 @@
 import numpy as np
 from dataclasses import dataclass
 from metrics import OSI_Metrics, OSI_OSCR_Curve, OSI_ROC_Curve, OSI_DET_Curve, OSI_EER, OSI_FPIR_OpPoint
+from calc_osi_metrics_agg import _aggregate_OSI_metrics
 
 
 @dataclass(frozen=True)
@@ -105,22 +106,24 @@ def _calc_OSI_metrics_from_thr_decision_stats(thr_stats: OSI_ThresholdDecisionSt
         left=thrs_descending[0], right=thrs_descending[-1])
     oscr_auc = np.trapz(tpir_ascending, fpir_ascending)
 
-    oscr_curve = OSI_OSCR_Curve(x_fpir=oscr_x_fpir, x_fpir_std=np.zeros_like(oscr_x_fpir),
-                                y_tpir=oscr_y_tpir, y_tpir_std=np.zeros_like(oscr_y_tpir),
-                                y_thr=oscr_y_thr, y_thr_std=np.zeros_like(oscr_y_thr),
+    oscr_curve = OSI_OSCR_Curve(x_fpir=oscr_x_fpir,
+                                y_tpir=oscr_y_tpir, y_tpir_std=np.zeros_like(
+                                    oscr_y_tpir),
+                                y_thr=oscr_y_thr, y_thr_std=np.zeros_like(
+                                    oscr_y_thr),
                                 auc=oscr_auc, auc_std=0.0)
 
     # TPIR @ FPIR=10%, TPIR @ FPIR=1%, TPIR @ FPIR=0.1%, TPIR @ FPIR=0.01%
     fpir_targets = np.array([1e-1, 1e-2, 1e-3, 1e-4])
     main_fpir_op_points = {
         fpir: OSI_FPIR_OpPoint(
-                fpir=fpir,
-                tpir=np.interp(fpir, fpir_ascending, tpir_ascending,
-                               left=0, right=tpir_ascending[-1]),
-                thr=np.interp(fpir, fpir_ascending, thrs_descending,
-                              left=thrs_descending[0], right=thrs_descending[-1]),
-                tpir_std=0.0, thr_std=0.0
-            )
+            fpir=fpir,
+            tpir=np.interp(fpir, fpir_ascending, tpir_ascending,
+                           left=0, right=tpir_ascending[-1]),
+            thr=np.interp(fpir, fpir_ascending, thrs_descending,
+                          left=thrs_descending[0], right=thrs_descending[-1]),
+            tpir_std=0.0, thr_std=0.0
+        )
         for fpir in fpir_targets
     }
 
@@ -141,9 +144,11 @@ def _calc_OSI_metrics_from_thr_decision_stats(thr_stats: OSI_ThresholdDecisionSt
                           left=thrs_descending[0], right=thrs_descending[-1])
     roc_auc = np.trapz(tpr_ascending, fpr_ascending)
 
-    roc_curve = OSI_ROC_Curve(x_fpr=roc_x_fpr, x_fpr_std=np.zeros_like(roc_x_fpr),
-                              y_tpr=roc_y_tpr, y_tpr_std=np.zeros_like(roc_y_tpr),
-                              y_thr=roc_y_thr, y_thr_std=np.zeros_like(roc_y_thr),
+    roc_curve = OSI_ROC_Curve(x_fpr=roc_x_fpr,
+                              y_tpr=roc_y_tpr, y_tpr_std=np.zeros_like(
+                                  roc_y_tpr),
+                              y_thr=roc_y_thr, y_thr_std=np.zeros_like(
+                                  roc_y_thr),
                               auc=roc_auc, auc_std=0.0)
 
     # DET: x=FPR vs y=FNR(FNIR)
@@ -165,9 +170,11 @@ def _calc_OSI_metrics_from_thr_decision_stats(thr_stats: OSI_ThresholdDecisionSt
                           right=thrs_descending[-1])
     det_auc = np.trapz(fnr_descending, fpr_ascending)
 
-    det_curve = OSI_DET_Curve(x_fpr=det_x_fpr, x_fpr_std=np.zeros_like(det_x_fpr),
-                              y_fnr=det_y_fnr, y_fnr_std=np.zeros_like(det_y_fnr),
-                              y_thr=det_y_thr, y_thr_std=np.zeros_like(det_y_thr),
+    det_curve = OSI_DET_Curve(x_fpr=det_x_fpr,
+                              y_fnr=det_y_fnr, y_fnr_std=np.zeros_like(
+                                  det_y_fnr),
+                              y_thr=det_y_thr, y_thr_std=np.zeros_like(
+                                  det_y_thr),
                               auc=det_auc, auc_std=0.0)
 
     # Equal Error Rate: FPIR ≈ FNIR
@@ -307,7 +314,9 @@ def _calc_OSI_thr_decision_stats(top1_labels: np.ndarray,
 
 def _calc_OSI_metrics(class_labels_ranked: np.ndarray,
                       class_scores_ranked: np.ndarray,
-                      query_labels: np.ndarray):
+                      query_labels: np.ndarray,
+                      unknown_pct: float = 0.5,
+                      num_iters: int = 5):
     """
     Calculate open-set identification metrics.
 
@@ -332,54 +341,62 @@ def _calc_OSI_metrics(class_labels_ranked: np.ndarray,
 
     # TODO repeat following experiment 5 - 10 times
 
-    # STEP 1: Select 20% of labels to withold from gallery
+    osi_metrics_list = []
 
-    N_labels = len(labels)
-    N_labels_unknown = int(0.2 * len(labels))
-    # N_labels_known = N_labels - N_labels_unknown
+    for _ in range(num_iters):
 
-    # (N_labels_unknown)
-    unknown_label_idx = rng.choice(
-        N_labels, size=N_labels_unknown, replace=False)
+        # STEP 1: Select 20% of labels to withold from gallery
 
-    # (N_labels_unknown)
-    unknown_labels = labels[unknown_label_idx]
+        N_labels = len(labels)
+        N_labels_unknown = int(unknown_pct * len(labels))
+        # N_labels_known = N_labels - N_labels_unknown
 
-    # STEP 2: Mark queries as unknown, based on withold labels
+        # (N_labels_unknown)
+        unknown_label_idx = rng.choice(
+            N_labels, size=N_labels_unknown, replace=False)
 
-    # boolean mask over queries,
-    #   where True indicates that the query label is in unknowns
-    # (N_queries)
-    unknown_query_mask = np.isin(query_labels, unknown_labels)
+        # (N_labels_unknown)
+        unknown_labels = labels[unknown_label_idx]
 
-    N_queries = len(query_labels)
+        # STEP 2: Mark queries as unknown, based on withold labels
 
-    # STEP 3: Remove unknown labels and their scores from ranking
+        # boolean mask over queries,
+        #   where True indicates that the query label is in unknowns
+        # (N_queries)
+        unknown_query_mask = np.isin(query_labels, unknown_labels)
 
-    # create boolean mask over class_labels_ranked 2D array,
-    #   where True indicates that the label is known
-    # (N_queries, N_labels)
-    known_mask = ~np.isin(class_labels_ranked, unknown_labels)
+        N_queries = len(query_labels)
 
-    # remove unknown labels and their scores
-    # (N_queries, N_labels) = class_labels_ranked
-    # (N_queries * (N_labels - N_labels_unknown)) = class_labels_ranked[mask]  (boolean indexing flattens array)
-    # (N_queries, N_labels - N_labels_unknown) = class_labels_ranked[mask].reshape(N_queries, -1)
-    class_labels_ranked_k = class_labels_ranked[known_mask].reshape(
-        N_queries, -1)
-    class_scores_ranked_k = class_scores_ranked[known_mask].reshape(
-        N_queries, -1)
+        # STEP 3: Remove unknown labels and their scores from ranking
 
-    # get top 1 predicted labels and their scores
-    # (N_queries)
-    top1_labels = class_labels_ranked_k[:, 0]
-    top1_scores = class_scores_ranked_k[:, 0]
+        # create boolean mask over class_labels_ranked 2D array,
+        #   where True indicates that the label is known
+        # (N_queries, N_labels)
+        known_mask = ~np.isin(class_labels_ranked, unknown_labels)
 
-    # STEP 4: Calculate per threshold decision query count statistics
-    thr_stats = _calc_OSI_thr_decision_stats(top1_labels, top1_scores,
-                                             query_labels, unknown_query_mask)
+        # remove unknown labels and their scores
+        # (N_queries, N_labels) = class_labels_ranked
+        # (N_queries * (N_labels - N_labels_unknown)) = class_labels_ranked[mask]  (boolean indexing flattens array)
+        # (N_queries, N_labels - N_labels_unknown) = class_labels_ranked[mask].reshape(N_queries, -1)
+        class_labels_ranked_k = class_labels_ranked[known_mask].reshape(
+            N_queries, -1)
+        class_scores_ranked_k = class_scores_ranked[known_mask].reshape(
+            N_queries, -1)
 
-    # STEP 5: Calculate metrics from the per threshold decision query count statistics
-    osi_metrics = _calc_OSI_metrics_from_thr_decision_stats(thr_stats)
+        # get top 1 predicted labels and their scores
+        # (N_queries)
+        top1_labels = class_labels_ranked_k[:, 0]
+        top1_scores = class_scores_ranked_k[:, 0]
 
-    return osi_metrics
+        # STEP 4: Calculate per threshold decision query count statistics
+        thr_stats = _calc_OSI_thr_decision_stats(top1_labels, top1_scores,
+                                                 query_labels, unknown_query_mask)
+
+        # STEP 5: Calculate metrics from the per threshold decision query count statistics
+        osi_metrics = _calc_OSI_metrics_from_thr_decision_stats(thr_stats)
+
+        osi_metrics_list.append(osi_metrics)
+
+    osi_metrics_aggregated = _aggregate_OSI_metrics(osi_metrics_list)
+
+    return osi_metrics_aggregated
