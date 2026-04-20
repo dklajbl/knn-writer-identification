@@ -114,7 +114,8 @@ def _calc_mAP(gallery_labels_ranked: np.ndarray, query_labels: np.ndarray):
     #   1.0 -> the label matches the label of the query
     #   0.0 -> the label does not match the label of the query
     # (N_queries, N_gallery)
-    relevant_mask = (gallery_labels_ranked == query_labels[:, None]).astype(np.float32)
+    relevant_mask = (gallery_labels_ranked ==
+                     query_labels[:, None]).astype(np.float32)
 
     # counts number relevant items for each rank
     # (N_queries, N_gallery)
@@ -138,10 +139,11 @@ def _calc_mAP(gallery_labels_ranked: np.ndarray, query_labels: np.ndarray):
     #   = (1 / num. relevant items for query)
     #       * (sum over precisions at relevant positions of the query)
     # (N_queries)
-    average_precisions = np.where(
-        num_relevant > 0,
-        (precisions * relevant_mask).sum(axis=1) / num_relevant,
-        0.0
+    average_precisions = np.divide(
+        (precisions * relevant_mask).sum(axis=1),
+        num_relevant,
+        out=np.zeros(num_relevant.shape, dtype=float),
+        where=num_relevant > 0
     )
 
     # calcualte mean average precision
