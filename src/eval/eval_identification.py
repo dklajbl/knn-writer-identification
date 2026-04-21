@@ -36,13 +36,18 @@ def _get_all_from_dataloader(encoder: torch.nn.Module,
     with torch.no_grad():
         # TODO: Need to modify to work with newest dataloader implementation
 
-        # (B, P, C, H, W), (B, P, C, H, W), (B,)
-        for samples_1, samples_2, labels in dataloader:
-            # ignore second samples
+        for batch in dataloader:
+            # grid patcher returns 5-tuple (with padding masks), random/sift return 3-tuple
+            if len(batch) == 5:
+                samples_1, samples_2, labels, mask_1, mask_2 = batch
+            else:
+                samples_1, samples_2, labels = batch
+                mask_1 = None
 
             # (B, P, C, H, W)
             samples_1 = samples_1.to(device)
-            embeds = encoder(samples_1)
+            padding_mask = mask_1.to(device) if mask_1 is not None else None
+            embeds = encoder(samples_1, padding_mask=padding_mask)
 
             # # (B, P, C, H, W) -> (B, P, H, W, C)
             # # multiplying by 255 to scale values from [0, 1] to [0, 255]
