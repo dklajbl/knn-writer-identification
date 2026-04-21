@@ -607,8 +607,8 @@ class IdDataset(torch.utils.data.Dataset):
         if self.aug is not None:
             image_1, image_2 = self.aug(images=[image_1, image_2])
 
-        image_1 = self.patcher.extract_patches(image_1)
-        image_2 = self.patcher.extract_patches(image_2)
+        image_1 = self.patcher.extract_patches(image_1, key=name_1)
+        image_2 = self.patcher.extract_patches(image_2, key=name_2)
 
         image_1 = torch.from_numpy(image_1.transpose(0, 3, 1, 2).copy()).float().div_(255.0)
         image_2 = torch.from_numpy(image_2.transpose(0, 3, 1, 2).copy()).float().div_(255.0)

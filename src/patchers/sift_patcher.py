@@ -1,26 +1,25 @@
-import cv2
-import logging
+import lmdb
+import pickle
 import numpy as np
 from src.patchers.base_patcher import BasePatcher
 from src.patchers.patcher_config import PatcherConfig
-from src.patchers.random_patcher import RandomPatcher
 from src.patchers.utils import normalize_patch_size
-
-
-logger = logging.getLogger(__name__)
 
 
 class SIFTPatcher(BasePatcher):
 
     """
-    SIFT-based patcher for text and document images.
+    SIFT-based patcher that reads pre-computed keypoints from an LMDB.
 
-    Behavior:
-        1. detect SIFT keypoints
-        2. sort them from strongest to weakest
-        3. extract fixed-size patches centered at keypoints
-        4. if there are too few valid patches, duplicate them in order
-           from strongest to weakest until patch_count is reached
+    The keypoints LMDB is produced by `src/patchers/extract_keypoints.py`.
+    Each record is keyed by the image name and holds a pickled dict with a (keypoint_count, 2) array of (y, x) rows.
+    Detector keypoints are sorted strongest-first and padded with random keypoints so every image has exactly `keypoint_count` entries.
+
+    At __getitem__ time this patcher:
+        1. loads the record for the image key,
+        2. validates that keypoint_count >= patch_count (hard error otherwise),
+        3. takes the first `patch_count` keypoints,
+        4. extracts a fixed-size patch centered at each (y, x).
     """
 
     def __init__(self, config: PatcherConfig):
@@ -29,10 +28,10 @@ class SIFTPatcher(BasePatcher):
         Initialize the SIFT patcher.
 
         Parameters:
-            config (PatcherConfig): Patcher configuration.
+            config (PatcherConfig): Patcher configuration. `sift_keypoints_lmdb_path` must be set.
 
         Raises:
-            ValueError: If patch size is invalid.
+            ValueError: If patch size is invalid or the keypoints LMDB path is missing.
         """
 
         super().__init__(config)
@@ -44,52 +43,54 @@ class SIFTPatcher(BasePatcher):
         if self.patch_height <= 0 or self.patch_width <= 0:
             raise ValueError("patch_height and patch_width must be > 0")
 
-        # cv2.SIFT cannot be pickled, so it is created lazily to support multiprocessing DataLoaders (which pickle the dataset and its patcher)
-        self._sift = None
+        if config.sift_keypoints_lmdb_path is None:
+            raise ValueError(
+                "SIFTPatcher requires `sift_keypoints_lmdb_path` in PatcherConfig. "
+                "Run `python -m src.patchers.extract_keypoints ...` first to build the LMDB."
+            )
 
-        # fallback patcher for when SIFT finds no keypoints or patch_count is not satisfied (to fill SIFT patches with random ones)
-        self._random_fallback = RandomPatcher(config)
+        self.keypoints_lmdb_path = config.sift_keypoints_lmdb_path
 
-    @property
-    def sift(self) -> cv2.SIFT:
+        # LMDB objects are opened lazily so worker processes spawned by DataLoader get their own handle
+        self._env: lmdb.Environment | None = None
+        self._txn: lmdb.Transaction | None = None
+
+    def _ensure_lmdb_open(self) -> None:
 
         """
-        Lazily create and return the OpenCV SIFT detector.
-
-        The SIFT object is not created in __init__ because cv2.SIFT cannot be pickled,
-        and PyTorch DataLoader with num_workers > 0 pickles the dataset (and its patcher)
-        when spawning worker processes.
-
-        Returns:
-            cv2.SIFT: OpenCV SIFT feature detector.
+        Open the keypoints LMDB on first use. Safe under DataLoader multiprocessing because each worker
+        process pickles its patcher (without the env) and opens a fresh read-only handle here.
         """
 
-        if self._sift is None:
-            self._sift = cv2.SIFT_create(nfeatures=self.patch_count)
+        if self._txn is None:
+            self._env = lmdb.open(
+                self.keypoints_lmdb_path,
+                readonly=True,
+                lock=False,
+                readahead=False,
+            )
+            self._txn = self._env.begin(write=False)
 
-        return self._sift
-
-    def _extract_patch_around_keypoint(
+    def _extract_patch_at(
         self,
         image: np.ndarray,
-        keypoint: cv2.KeyPoint,
+        y_center: int,
+        x_center: int,
     ) -> np.ndarray:
 
         """
-        Extract one fixed-size patch centered at a SIFT keypoint.
+        Extract one fixed-size patch centered at (y_center, x_center), clipping at image borders and resizing to the target (patch_height, patch_width) when the clip produced a smaller crop.
 
         Parameters:
             image (np.ndarray): Input image of shape (H, W, C).
-            keypoint (cv2.KeyPoint): SIFT keypoint.
+            y_center (int): Row coordinate of the keypoint.
+            x_center (int): Column coordinate of the keypoint.
 
         Returns:
-            np.ndarray: Extracted patch with shape (patch_height, patch_width, C).
+            np.ndarray: Patch of shape (patch_height, patch_width, C).
         """
 
         img_height, img_width, _ = image.shape
-
-        x_center = int(round(keypoint.pt[0]))
-        y_center = int(round(keypoint.pt[1]))
 
         half_h = self.patch_height // 2
         half_w = self.patch_width // 2
@@ -104,19 +105,21 @@ class SIFTPatcher(BasePatcher):
 
         return patch
 
-    def extract_patches(self, image: np.ndarray) -> np.ndarray:
+    def extract_patches(self, image: np.ndarray, key: str | None = None) -> np.ndarray:
 
         """
-        Extract SIFT-guided fixed-size patches from the input image.
+        Extract fixed-size patches centered at the pre-computed SIFT keypoints for `key`.
 
         Parameters:
             image (np.ndarray): Input image of shape (H, W, C).
+            key (str): Image name used to look up keypoints in the LMDB.
 
         Returns:
             np.ndarray: Array of shape (patch_count, patch_height, patch_width, C).
 
         Raises:
-            ValueError: If the input image is invalid or no valid SIFT patches are found.
+            ValueError: If the input image is invalid, `key` is missing, or the LMDB stores fewer keypoints per image than the requested `patch_count`.
+            KeyError: If `key` is not present in the keypoints LMDB.
         """
 
         if image is None:
@@ -125,51 +128,38 @@ class SIFTPatcher(BasePatcher):
         if image.ndim != 3:
             raise ValueError(f"Expected image shape (H, W, C), got {image.shape}")
 
+        if key is None:
+            raise ValueError("SIFTPatcher.extract_patches requires `key` (the image name) to look up keypoints.")
+
         # SPECIAL CASE: patch_count == 1 -> return full image (with expanded shape "patch_count"=1)
         if self.patch_count == 1:
             return np.expand_dims(image, axis=0)
 
-        gray = image[:, :, 0]
+        self._ensure_lmdb_open()
+        raw = self._txn.get(key.encode())
 
-        keypoints = self.sift.detect(gray, None)
+        if raw is None:
+            raise KeyError(
+                f"Image key {key!r} not found in SIFT keypoints LMDB '{self.keypoints_lmdb_path}'. "
+                f"Make sure extract_keypoints.py was run over the same image LMDB this split references."
+            )
 
-        if keypoints is None:
-            keypoints = []
+        record = pickle.loads(raw)
+        keypoints = record["keypoints"]  # (keypoint_count, 2), rows = (y, x)
 
-        # sort from strongest to weakest
-        keypoints = sorted(keypoints, key=lambda kp: kp.response, reverse=True)
+        stored_count = int(keypoints.shape[0])
 
-        if len(keypoints) == 0:
-            logger.warning("SIFT found no keypoints, falling back to random patcher.")
-            return self._random_fallback.extract_patches(image)
+        if stored_count < self.patch_count:
+            raise ValueError(
+                f"SIFT keypoints LMDB stores only {stored_count} keypoints per image, but patch_count={self.patch_count}."
+                f"Re-run extract_keypoints.py with --keypoint-count >= {self.patch_count}."
+            )
 
-        patches = []
+        selected = keypoints[: self.patch_count]
 
-        # extract each patch (where each keypoint is a center of the patch)
-        for keypoint in keypoints:
-
-            if len(patches) >= self.patch_count:
-                break
-
-            patch = self._extract_patch_around_keypoint(image, keypoint)
-            patches.append(patch)
-
-        if len(patches) < self.patch_count:
-            # remaining patches (patch_count not satisfied) are filled with random ones
-
-            remaining = self.patch_count - len(patches)
-            original_count = self._random_fallback.patch_count
-
-            try:
-                if remaining == 1:  # if 1 patch is missing, make random patcher to extract 2 patches and choose just the 1st one - reason is when patch_count = 1, the random patcher returns original image
-                    self._random_fallback.patch_count = 2
-                    random_patches = self._random_fallback.extract_patches(image)
-                    patches.append(random_patches[0])
-                else:
-                    self._random_fallback.patch_count = remaining
-                    random_patches = self._random_fallback.extract_patches(image)
-                    patches.extend(list(random_patches))
-            finally:
-                self._random_fallback.patch_count = original_count
+        patches = [
+            self._extract_patch_at(image, int(y), int(x))
+            for y, x in selected
+        ]
 
         return np.stack(patches, axis=0)

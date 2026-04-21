@@ -31,13 +31,15 @@ class BasePatcher(ABC):
         self.rng = np.random.default_rng(config.random_seed)
 
     @abstractmethod
-    def extract_patches(self, image: np.ndarray) -> np.ndarray:
+    def extract_patches(self, image: np.ndarray, key: str | None = None) -> np.ndarray:
 
         """
         Extract patches from an image.
 
         Parameters:
             image (np.ndarray): input image as a NumPy array with shape (H, W, C).
+            key (str | None): identifier of the image (e.g. its LMDB key).
+                Required by patchers that look up pre-computed metadata (e.g. the SIFT patcher, which reads keypoints from a secondary LMDB). Ignored by patchers that only need the image itself (grid, random).
 
         Returns:
             np.ndarray: extracted patches as a NumPy array with shape (N, patch_H, patch_W, C).

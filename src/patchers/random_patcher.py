@@ -43,13 +43,14 @@ class RandomPatcher(BasePatcher):
         if self.patch_height <= 0 or self.patch_width <= 0:
             raise ValueError("patch_height and patch_width must be > 0")
 
-    def extract_patches(self, image: np.ndarray) -> np.ndarray:
+    def extract_patches(self, image: np.ndarray, key: str | None = None) -> np.ndarray:
 
         """
         Extract random patches from the input image.
 
         Parameters:
             image (np.ndarray): Input image of shape (H, W, C).
+            key (str | None): ignored. Present to satisfy the BasePatcher interface.
 
         Returns:
             np.ndarray: Array of shape (patch_count, patch_height, patch_width, C).

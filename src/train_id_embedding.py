@@ -66,6 +66,16 @@ def parse_args() -> argparse.Namespace:
         help=f"Patching method to use. Available options: {PATCH_METHODS}",
     )
 
+    parser.add_argument(
+        "--sift-keypoints-lmdb",
+        type=str,
+        default=None,
+        help=(
+            "Path to an LMDB produced by `python -m src.patchers.extract_keypoints` "
+            "holding pre-computed SIFT keypoints. Required when --patcher sift."
+        ),
+    )
+
     parser.add_argument("--patch-count", type=int, default=50)
 
     parser.add_argument(
@@ -134,7 +144,12 @@ def parse_args() -> argparse.Namespace:
         ),
     )
 
-    return parser.parse_args()
+    args = parser.parse_args()
+
+    if args.patcher == "sift" and args.sift_keypoints_lmdb is None:
+        parser.error("--sift-keypoints-lmdb is required when --patcher is 'sift'.")
+
+    return args
 
 def log_args(args: argparse.Namespace, logger=None) -> None:
     """Print parsed arguments, one per line, aligned by the longest name."""
@@ -222,6 +237,7 @@ def create_train_dataset(args) -> IdDataset:
         patch_height=args.patch_height,
         patch_width=args.patch_width,
         min_partial_ratio=0.3,
+        sift_keypoints_lmdb_path=args.sift_keypoints_lmdb,
     )
 
     return IdDataset(
@@ -290,6 +306,7 @@ def create_eval_dataloaders(args) -> tuple[DataLoader | None, DataLoader | None]
         patch_height=args.patch_height,
         patch_width=args.patch_width,
         min_partial_ratio=0.3,
+        sift_keypoints_lmdb_path=args.sift_keypoints_lmdb,
     )
 
     collate_fn = pad_patches_collate if args.patcher == "grid" else None
