@@ -8,7 +8,7 @@ from .metrics_osi import OSI_Metrics
 
 
 @dataclass
-class IdnetificationMetrics:
+class IdentificationMetrics:
     """
     Stores (open-set and closed-set) identification metrics.
     """

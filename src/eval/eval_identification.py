@@ -5,7 +5,7 @@ from torch.utils.data import DataLoader
 
 from .eval_csi import _calc_CSI_metrics
 from .eval_osi import _calc_OSI_metrics
-from .metrics_identification import IdnetificationMetrics
+from .metrics_identification import IdentificationMetrics
 from .eval_identification_ranking import _get_gallery_ranking, _pool_gallery_to_class_ranking
 
 
@@ -185,6 +185,6 @@ def eval_identification(
 
     eval_time = time.time() - start_time
 
-    return IdnetificationMetrics(csi_metrics=csi_metrics,
+    return IdentificationMetrics(csi_metrics=csi_metrics,
                                  osi_metrics=osi_metrics,
                                  eval_time=eval_time)
