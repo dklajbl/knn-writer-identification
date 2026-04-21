@@ -16,6 +16,9 @@ logger = logging.getLogger(__name__)
 # supported detectors (only SIFT is implemented, FAST is scaffolded for later)
 SUPPORTED_METHODS = ["sift", "fast"]
 
+# Flush the output LMDB write transaction every N processed images so a hard kill (walltime, OOM, SIGKILL) can only lose up to N images of work.
+COMMIT_EVERY = 1000
+
 # Per-worker state for the parallel extraction path. Populated once by `_worker_init` in each spawned process.
 _worker_input_env: lmdb.Environment | None = None
 _worker_rng: np.random.Generator | None = None
@@ -357,11 +360,15 @@ def _process_lmdb_sequential(
     random_seed: int | None,
     map_size_bytes: int,
     log_every: int,
+    commit_every: int,
 ) -> ExtractionStats:
 
     """
     Single-process extraction path.
     Iterates every key in the input LMDB, computes keypoints for each image, and writes them to the output LMDB under the same key.
+
+    Durability: the write transaction is committed (and its fsync fires) every `commit_every` processed images, then reopened.
+    A hard kill (walltime, OOM, SIGKILL) can therefore only lose up to `commit_every` images of work instead of the whole run.
 
     Parameters:
         input_lmdb_path (str): path to the source (read-only) LMDB containing images.
@@ -372,6 +379,7 @@ def _process_lmdb_sequential(
         random_seed (int | None): RNG seed for the random-fill generator.
         map_size_bytes (int): LMDB map size for the output environment.
         log_every (int): how often (in images) to emit a progress log line.
+        commit_every (int): how often (in images) to flush the output write transaction.
 
     Returns:
         ExtractionStats: aggregated statistics for the run.
@@ -397,50 +405,67 @@ def _process_lmdb_sequential(
     )
 
     try:
-        with input_env.begin(write=False) as input_txn, output_env.begin(write=True) as output_txn:
+        with input_env.begin(write=False) as input_txn:
 
-            cursor = input_txn.cursor()
+            output_txn = output_env.begin(write=True)
 
             try:
-                # keys from the cursor are already bytes - no .encode() needed
-                for key, raw_bytes in cursor:
+                cursor = input_txn.cursor()
 
-                    # resume mode - don't touch keys that are already in the output LMDB
-                    if not rewrite_existing and output_txn.get(key) is not None:
-                        stats.skipped += 1
-                        continue
+                try:
+                    # keys from the cursor are already bytes - no .encode() needed
+                    for key, raw_bytes in cursor:
 
-                    gray = decode_grayscale_image(raw_bytes)
+                        # resume mode - don't touch keys that are already in the output LMDB
+                        if not rewrite_existing and output_txn.get(key) is not None:
+                            stats.skipped += 1
+                            continue
 
-                    if gray is None:
-                        logger.warning(f"Failed to decode image for key: {key!r}")
-                        stats.errors += 1
-                        continue
+                        gray = decode_grayscale_image(raw_bytes)
 
-                    keypoints, split_index = build_keypoint_record(gray, method, keypoint_count, rng)
+                        if gray is None:
+                            logger.warning(f"Failed to decode image for key: {key!r}")
+                            stats.errors += 1
+                            continue
 
-                    record_bytes = serialize_record(
-                        keypoints=keypoints,
-                        split_index=split_index,
-                        method=method,
-                        image_shape=(int(gray.shape[0]), int(gray.shape[1])),
+                        keypoints, split_index = build_keypoint_record(gray, method, keypoint_count, rng)
+
+                        record_bytes = serialize_record(
+                            keypoints=keypoints,
+                            split_index=split_index,
+                            method=method,
+                            image_shape=(int(gray.shape[0]), int(gray.shape[1])),
+                        )
+
+                        output_txn.put(key, record_bytes, overwrite=True)
+
+                        stats.processed += 1
+                        _update_detection_stats(stats, split_index, keypoint_count)
+
+                        # chunked commit: flush the current txn and open a fresh one so already-processed
+                        # images are persistent even if the process is killed hard later.
+                        if stats.processed % commit_every == 0:
+                            output_txn.commit()
+                            output_txn = output_env.begin(write=True)
+
+                        if stats.processed % log_every == 0:
+                            logger.info(f"Progress: processed={stats.processed:,} | skipped={stats.skipped:,} | errors={stats.errors:,}")
+
+                except KeyboardInterrupt:
+                    # swallow so the current chunk still gets committed below
+                    stats.interrupted = True
+                    logger.warning(
+                        f"KeyboardInterrupt received after {stats.processed:,} images. "
+                        f"Committing partial progress and printing summary..."
                     )
 
-                    output_txn.put(key, record_bytes, overwrite=True)
+                # commit whatever remains staged in the current chunk
+                output_txn.commit()
 
-                    stats.processed += 1
-                    _update_detection_stats(stats, split_index, keypoint_count)
-
-                    if stats.processed % log_every == 0:
-                        logger.info(f"Progress: processed={stats.processed:,} | skipped={stats.skipped:,} | errors={stats.errors:,}")
-
-            except KeyboardInterrupt:
-                # catching here (instead of letting it propagate out of the `with`) lets the write transaction commit normally so all work done so far is preserved
-                stats.interrupted = True
-                logger.warning(
-                    f"KeyboardInterrupt received after {stats.processed:,} images. "
-                    f"Committing partial progress and printing summary..."
-                )
+            except BaseException:
+                # anything else - abort only the in-flight chunk; prior committed chunks remain persistent
+                output_txn.abort()
+                raise
 
         output_env.sync()
 
@@ -460,13 +485,14 @@ def _process_lmdb_parallel(
     random_seed: int | None,
     map_size_bytes: int,
     log_every: int,
+    commit_every: int,
     num_workers: int,
 ) -> ExtractionStats:
 
     """
     Parallel extraction path. Dispatches SIFT + random-fill work to `num_workers` spawned processes
     The main process streams keys from the input LMDB, applies the `rewrite_existing` skip logic, collects results as they complete, and
-    writes them to the output LMDB inside a single write transaction.
+    writes them to the output LMDB, committing every `commit_every` processed images.
 
     Parameters mirror `_process_lmdb_sequential`, plus:
         num_workers (int): number of worker processes to spawn (>= 2).
@@ -496,58 +522,85 @@ def _process_lmdb_parallel(
     ctx = mp.get_context("spawn")
 
     try:
-        with input_env.begin(write=False) as input_txn, output_env.begin(write=True) as output_txn:
+        # resume mode: snapshot the existing output keys into a set so the pool feeder thread never touches the (mutable, periodically committed) output write transaction
+        existing_keys: set[bytes] = set()
+        if not rewrite_existing:
+            with output_env.begin(write=False) as resume_txn:
+                with resume_txn.cursor() as resume_cursor:
+                    for k in resume_cursor.iternext(keys=True, values=False):
+                        existing_keys.add(bytes(k))
 
-            cursor = input_txn.cursor()
+            logger.info(f"Resume: {len(existing_keys):,} keys already present in output LMDB - will be skipped")
 
-            def key_generator():
-                # keys-only iteration avoids loading image bytes in the main process (workers fetch their own)
-                for key in cursor.iternext(keys=True, values=False):
+        with input_env.begin(write=False) as input_txn:
 
-                    key_bytes = bytes(key)
-
-                    if not rewrite_existing and output_txn.get(key_bytes) is not None:
-                        stats.skipped += 1
-                        continue
-
-                    yield key_bytes
-
-            pool = ctx.Pool(
-                processes=num_workers,
-                initializer=_worker_init,
-                initargs=(input_lmdb_path, method, keypoint_count, random_seed),
-            )
+            output_txn = output_env.begin(write=True)
 
             try:
-                try:
-                    for key_out, record_bytes, split_index, status in pool.imap_unordered(
-                        _worker_process_key, key_generator(), chunksize=16
-                    ):
-                        if status == "decode_error":
-                            logger.warning(f"Failed to decode image for key: {key_out!r}")
-                            stats.errors += 1
+                cursor = input_txn.cursor()
+
+                def key_generator():
+                    # keys-only iteration avoids loading image bytes in the main process (workers fetch their own)
+                    for key in cursor.iternext(keys=True, values=False):
+
+                        key_bytes = bytes(key)
+
+                        if not rewrite_existing and key_bytes in existing_keys:
+                            stats.skipped += 1
                             continue
 
-                        output_txn.put(key_out, record_bytes, overwrite=True)
+                        yield key_bytes
 
-                        stats.processed += 1
-                        _update_detection_stats(stats, split_index, keypoint_count)
+                pool = ctx.Pool(
+                    processes=num_workers,
+                    initializer=_worker_init,
+                    initargs=(input_lmdb_path, method, keypoint_count, random_seed),
+                )
 
-                        if stats.processed % log_every == 0:
-                            logger.info(f"Progress: processed={stats.processed:,} | skipped={stats.skipped:,} | errors={stats.errors:,}")
+                try:
+                    try:
+                        for key_out, record_bytes, split_index, status in pool.imap_unordered(
+                            _worker_process_key, key_generator(), chunksize=16
+                        ):
+                            if status == "decode_error":
+                                logger.warning(f"Failed to decode image for key: {key_out!r}")
+                                stats.errors += 1
+                                continue
 
-                    pool.close()
+                            output_txn.put(key_out, record_bytes, overwrite=True)
 
-                except KeyboardInterrupt:
-                    # kill outstanding workers so we can fall through and let the write txn commit normally, preserving work completed so far
-                    stats.interrupted = True
-                    pool.terminate()
-                    logger.warning(
-                        f"KeyboardInterrupt received after {stats.processed:,} images. "
-                        f"Committing partial progress and printing summary..."
-                    )
-            finally:
-                pool.join()
+                            stats.processed += 1
+                            _update_detection_stats(stats, split_index, keypoint_count)
+
+                            # chunked commit: flush the current txn and open a fresh one so already-processed
+                            # images are persistent even if the process is killed hard later.
+                            if stats.processed % commit_every == 0:
+                                output_txn.commit()
+                                output_txn = output_env.begin(write=True)
+
+                            if stats.processed % log_every == 0:
+                                logger.info(f"Progress: processed={stats.processed:,} | skipped={stats.skipped:,} | errors={stats.errors:,}")
+
+                        pool.close()
+
+                    except KeyboardInterrupt:
+                        # kill outstanding workers so we fall through and commit the current chunk normally
+                        stats.interrupted = True
+                        pool.terminate()
+                        logger.warning(
+                            f"KeyboardInterrupt received after {stats.processed:,} images. "
+                            f"Committing partial progress and printing summary..."
+                        )
+                finally:
+                    pool.join()
+
+                # commit whatever remains staged in the current chunk
+                output_txn.commit()
+
+            except BaseException:
+                # anything else - abort only the in-flight chunk; prior committed chunks remain persistent
+                output_txn.abort()
+                raise
 
         output_env.sync()
 
@@ -567,6 +620,7 @@ def process_lmdb(
     random_seed: int | None,
     map_size_bytes: int,
     log_every: int,
+    commit_every: int,
     num_workers: int,
 ) -> ExtractionStats:
 
@@ -582,6 +636,7 @@ def process_lmdb(
         random_seed (int | None): RNG seed for the random-fill generator.
         map_size_bytes (int): LMDB map size for the output environment.
         log_every (int): how often (in images) to emit a progress log line.
+        commit_every (int): how often (in images) to flush the output write transaction.
         num_workers (int): worker processes to use; 1 runs single-process, >=2 uses a spawn Pool.
 
     Returns:
@@ -598,6 +653,7 @@ def process_lmdb(
             random_seed=random_seed,
             map_size_bytes=map_size_bytes,
             log_every=log_every,
+            commit_every=commit_every,
         )
 
     return _process_lmdb_parallel(
@@ -609,6 +665,7 @@ def process_lmdb(
         random_seed=random_seed,
         map_size_bytes=map_size_bytes,
         log_every=log_every,
+        commit_every=commit_every,
         num_workers=num_workers,
     )
 
@@ -676,7 +733,7 @@ def main() -> None:
         f"Extracting {args.method.upper()} keypoints: "
         f"{args.input_lmdb} -> {args.output_lmdb} "
         f"(keypoint_count={args.keypoint_count}, rewrite_existing={args.rewrite_existing}, "
-        f"seed={args.random_seed}, num_workers={args.num_workers})"
+        f"seed={args.random_seed}, num_workers={args.num_workers}, commit_every={COMMIT_EVERY})"
     )
 
     stats = process_lmdb(
@@ -688,6 +745,7 @@ def main() -> None:
         random_seed=args.random_seed,
         map_size_bytes=args.map_size_bytes,
         log_every=args.log_every,
+        commit_every=COMMIT_EVERY,
         num_workers=args.num_workers,
     )
 
