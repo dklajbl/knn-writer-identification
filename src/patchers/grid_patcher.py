@@ -35,7 +35,7 @@ class GridPatcher(BasePatcher):
         self.interpolation = config.interpolation
         self.min_partial_ratio = config.min_partial_ratio
 
-    def extract_patches(self, image: np.ndarray) -> np.ndarray:
+    def extract_patches(self, image: np.ndarray, key: str | None = None) -> np.ndarray:
 
         """
         Extract fixed-size patches from the image in reading order (left-to-right, top-to-bottom).
@@ -46,6 +46,7 @@ class GridPatcher(BasePatcher):
 
         Parameters:
             image (np.ndarray): input image as a NumPy array with shape (H, W, C).
+            key (str | None): ignored. Present to satisfy the BasePatcher interface.
 
         Returns:
             np.ndarray: extracted patches with shape (N, patch_height, patch_width, C), where N is the number of patches that fit in this image.
