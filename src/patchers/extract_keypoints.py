@@ -1,17 +1,26 @@
+# Metacentrum run: just watch out for --num-workers, and write the output LMDB to $SCRATCHDIR first.
+
+import os
 import cv2
 import lmdb
 import pickle
 import logging
 import argparse
 import numpy as np
+import multiprocessing as mp
 from dataclasses import dataclass
 
 
 logger = logging.getLogger(__name__)
 
-
 # supported detectors (only SIFT is implemented, FAST is scaffolded for later)
 SUPPORTED_METHODS = ["sift", "fast"]
+
+# Per-worker state for the parallel extraction path. Populated once by `_worker_init` in each spawned process.
+_worker_input_env: lmdb.Environment | None = None
+_worker_rng: np.random.Generator | None = None
+_worker_method: str | None = None
+_worker_keypoint_count: int | None = None
 
 
 @dataclass
@@ -72,6 +81,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--random-seed", type=int, default=None, help="Optional RNG seed for reproducible random-fill keypoints.")
     parser.add_argument("--map-size-bytes", type=int, default=2 ** 40, help="LMDB map size for the output environment in bytes (default 1 TiB).")
     parser.add_argument("--log-every", type=int, default=1000, help="How often to emit progress log lines (every N processed images).")
+    parser.add_argument("--num-workers", type=int, default=1, help="Number of worker processes for SIFT extraction. Set to 1 to run single-process (default: 1).")
 
     args = parser.parse_args()
 
@@ -80,6 +90,9 @@ def parse_args() -> argparse.Namespace:
 
     if args.log_every <= 0:
         parser.error("--log-every must be > 0")
+
+    if args.num_workers < 1:
+        parser.error("--num-workers must be >= 1")
 
     return args
 
@@ -262,7 +275,80 @@ def _update_detection_stats(stats: ExtractionStats, split_index: int, keypoint_c
         stats.partially_detected += 1
 
 
-def process_lmdb(
+def _worker_init(input_lmdb_path: str, method: str, keypoint_count: int, random_seed: int | None) -> None:
+
+    """
+    Initializer run once per worker process in the parallel extraction pool.
+
+    Opens a per-worker read-only handle to the input LMDB, pins OpenCV to a single thread, and seeds a per-worker RNG (perturbed by PID so different workers produce distinct random streams).
+
+    Parameters:
+        input_lmdb_path (str): path to the source LMDB of images.
+        method (str): detector method ("sift" or "fast").
+        keypoint_count (int): target total keypoints per image.
+        random_seed (int | None): optional base RNG seed; each worker adds its PID.
+    """
+
+    global _worker_input_env, _worker_rng, _worker_method, _worker_keypoint_count
+
+    cv2.setNumThreads(1)
+
+    _worker_input_env = lmdb.open(
+        input_lmdb_path,
+        readonly=True,
+        lock=False,
+        readahead=False,
+    )
+
+    if random_seed is None:
+        _worker_rng = np.random.default_rng()
+    else:
+        _worker_rng = np.random.default_rng(random_seed + os.getpid())
+
+    _worker_method = method
+    _worker_keypoint_count = keypoint_count
+
+
+def _worker_process_key(key: bytes) -> tuple[bytes, bytes | None, int, str]:
+
+    """
+    Worker task: fetch raw image bytes for `key` from the per-worker input LMDB, run the detector + random fill, and return a serialized keypoint record for the main process to write.
+
+    Parameters:
+        key (bytes): LMDB key of the image to process.
+
+    Returns:
+        tuple[bytes, bytes | None, int, str]:
+            - key: echoed back so the main process can `put(key, record)`.
+            - record_bytes: pickled record payload, or None on decode failure.
+            - split_index: number of detector keypoints (0 on decode failure).
+            - status: "ok" or "decode_error".
+    """
+
+    with _worker_input_env.begin(write=False) as txn:
+        raw_bytes = txn.get(key)
+
+    if raw_bytes is None:
+        return key, None, 0, "decode_error"
+
+    gray = decode_grayscale_image(raw_bytes)
+
+    if gray is None:
+        return key, None, 0, "decode_error"
+
+    keypoints, split_index = build_keypoint_record(gray, _worker_method, _worker_keypoint_count, _worker_rng)
+
+    record_bytes = serialize_record(
+        keypoints=keypoints,
+        split_index=split_index,
+        method=_worker_method,
+        image_shape=(int(gray.shape[0]), int(gray.shape[1])),
+    )
+
+    return key, record_bytes, split_index, "ok"
+
+
+def _process_lmdb_sequential(
     input_lmdb_path: str,
     output_lmdb_path: str,
     method: str,
@@ -274,8 +360,8 @@ def process_lmdb(
 ) -> ExtractionStats:
 
     """
-    Iterate every key in the input LMDB, compute keypoints for each image, and write them
-    to the output LMDB under the same key.
+    Single-process extraction path.
+    Iterates every key in the input LMDB, computes keypoints for each image, and writes them to the output LMDB under the same key.
 
     Parameters:
         input_lmdb_path (str): path to the source (read-only) LMDB containing images.
@@ -319,7 +405,7 @@ def process_lmdb(
                 # keys from the cursor are already bytes - no .encode() needed
                 for key, raw_bytes in cursor:
 
-                    # resume mode: don't touch keys that are already in the output LMDB
+                    # resume mode - don't touch keys that are already in the output LMDB
                     if not rewrite_existing and output_txn.get(key) is not None:
                         stats.skipped += 1
                         continue
@@ -363,6 +449,168 @@ def process_lmdb(
         input_env.close()
 
     return stats
+
+
+def _process_lmdb_parallel(
+    input_lmdb_path: str,
+    output_lmdb_path: str,
+    method: str,
+    keypoint_count: int,
+    rewrite_existing: bool,
+    random_seed: int | None,
+    map_size_bytes: int,
+    log_every: int,
+    num_workers: int,
+) -> ExtractionStats:
+
+    """
+    Parallel extraction path. Dispatches SIFT + random-fill work to `num_workers` spawned processes
+    The main process streams keys from the input LMDB, applies the `rewrite_existing` skip logic, collects results as they complete, and
+    writes them to the output LMDB inside a single write transaction.
+
+    Parameters mirror `_process_lmdb_sequential`, plus:
+        num_workers (int): number of worker processes to spawn (>= 2).
+
+    Returns:
+        ExtractionStats: aggregated statistics for the run.
+    """
+
+    stats = ExtractionStats()
+
+    input_env = lmdb.open(
+        input_lmdb_path,
+        readonly=True,
+        lock=False,
+        readahead=False,
+    )
+
+    output_env = lmdb.open(
+        output_lmdb_path,
+        map_size=map_size_bytes,
+        subdir=True,
+        readonly=False,
+        lock=True,
+        create=True,
+    )
+
+    ctx = mp.get_context("spawn")
+
+    try:
+        with input_env.begin(write=False) as input_txn, output_env.begin(write=True) as output_txn:
+
+            cursor = input_txn.cursor()
+
+            def key_generator():
+                # keys-only iteration avoids loading image bytes in the main process (workers fetch their own)
+                for key in cursor.iternext(keys=True, values=False):
+
+                    key_bytes = bytes(key)
+
+                    if not rewrite_existing and output_txn.get(key_bytes) is not None:
+                        stats.skipped += 1
+                        continue
+
+                    yield key_bytes
+
+            pool = ctx.Pool(
+                processes=num_workers,
+                initializer=_worker_init,
+                initargs=(input_lmdb_path, method, keypoint_count, random_seed),
+            )
+
+            try:
+                try:
+                    for key_out, record_bytes, split_index, status in pool.imap_unordered(
+                        _worker_process_key, key_generator(), chunksize=16
+                    ):
+                        if status == "decode_error":
+                            logger.warning(f"Failed to decode image for key: {key_out!r}")
+                            stats.errors += 1
+                            continue
+
+                        output_txn.put(key_out, record_bytes, overwrite=True)
+
+                        stats.processed += 1
+                        _update_detection_stats(stats, split_index, keypoint_count)
+
+                        if stats.processed % log_every == 0:
+                            logger.info(f"Progress: processed={stats.processed:,} | skipped={stats.skipped:,} | errors={stats.errors:,}")
+
+                    pool.close()
+
+                except KeyboardInterrupt:
+                    # kill outstanding workers so we can fall through and let the write txn commit normally, preserving work completed so far
+                    stats.interrupted = True
+                    pool.terminate()
+                    logger.warning(
+                        f"KeyboardInterrupt received after {stats.processed:,} images. "
+                        f"Committing partial progress and printing summary..."
+                    )
+            finally:
+                pool.join()
+
+        output_env.sync()
+
+    finally:
+        output_env.close()
+        input_env.close()
+
+    return stats
+
+
+def process_lmdb(
+    input_lmdb_path: str,
+    output_lmdb_path: str,
+    method: str,
+    keypoint_count: int,
+    rewrite_existing: bool,
+    random_seed: int | None,
+    map_size_bytes: int,
+    log_every: int,
+    num_workers: int,
+) -> ExtractionStats:
+
+    """
+    Dispatch to the sequential or parallel extraction implementation based on `num_workers`.
+
+    Parameters:
+        input_lmdb_path (str): path to the source LMDB of images.
+        output_lmdb_path (str): path to the output LMDB for keypoint records.
+        method (str): detector method ("sift" or "fast").
+        keypoint_count (int): total keypoints per image (detector + random fill).
+        rewrite_existing (bool): if True, overwrite existing entries; if False, skip them.
+        random_seed (int | None): RNG seed for the random-fill generator.
+        map_size_bytes (int): LMDB map size for the output environment.
+        log_every (int): how often (in images) to emit a progress log line.
+        num_workers (int): worker processes to use; 1 runs single-process, >=2 uses a spawn Pool.
+
+    Returns:
+        ExtractionStats: aggregated statistics for the run.
+    """
+
+    if num_workers <= 1:
+        return _process_lmdb_sequential(
+            input_lmdb_path=input_lmdb_path,
+            output_lmdb_path=output_lmdb_path,
+            method=method,
+            keypoint_count=keypoint_count,
+            rewrite_existing=rewrite_existing,
+            random_seed=random_seed,
+            map_size_bytes=map_size_bytes,
+            log_every=log_every,
+        )
+
+    return _process_lmdb_parallel(
+        input_lmdb_path=input_lmdb_path,
+        output_lmdb_path=output_lmdb_path,
+        method=method,
+        keypoint_count=keypoint_count,
+        rewrite_existing=rewrite_existing,
+        random_seed=random_seed,
+        map_size_bytes=map_size_bytes,
+        log_every=log_every,
+        num_workers=num_workers,
+    )
 
 
 def log_summary(stats: ExtractionStats, keypoint_count: int, method: str) -> None:
@@ -427,7 +675,8 @@ def main() -> None:
     logger.info(
         f"Extracting {args.method.upper()} keypoints: "
         f"{args.input_lmdb} -> {args.output_lmdb} "
-        f"(keypoint_count={args.keypoint_count}, rewrite_existing={args.rewrite_existing}, seed={args.random_seed})"
+        f"(keypoint_count={args.keypoint_count}, rewrite_existing={args.rewrite_existing}, "
+        f"seed={args.random_seed}, num_workers={args.num_workers})"
     )
 
     stats = process_lmdb(
@@ -439,6 +688,7 @@ def main() -> None:
         random_seed=args.random_seed,
         map_size_bytes=args.map_size_bytes,
         log_every=args.log_every,
+        num_workers=args.num_workers,
     )
 
     log_summary(stats, keypoint_count=args.keypoint_count, method=args.method)
