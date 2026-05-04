@@ -21,7 +21,7 @@ from src.utils import convert_sec_to_hours_minutes_seconds
 
 from src.patchers.patcher_config import PatcherConfig, PATCH_METHODS
 from src.patchers.collate import pad_patches_collate
-from src.eval import test_identification
+from src.eval import eval_identification
 
 from src.env_vars import NP_RANDOM_SEED
 
@@ -526,31 +526,13 @@ def main() -> None:
         eval_start = time.time()
         image_encoder.eval()
         with torch.no_grad():
-            metrics = test_identification(
+            metrics = eval_identification(
                 encoder=image_encoder,
                 gallery_dataloader=gallery_dataloader,
                 query_dataloader=query_dataloader,
                 device=device,
             )
-            logger.info(
-                f"CSI METRICS epoch {epoch}: "
-                + " ".join(
-                    f"{k}:{v}"
-                    for k, v in [
-                        (
-                            "cmc",
-                            "[" + ", ".join(f"{x:.3f}" for x in metrics.csi_metrics.cmc[:10]) + "]",
-                        ),
-                        ("mrr", f"{metrics.csi_metrics.mrr:.3f}"),
-                    ]
-                )
-            )
-            logger.info(
-                f"OSI METRICS epoch {epoch}:\n"
-                + "\n".join(
-                    f"{k}: {v}" for k, v in metrics.osi_metrics.main_fpir_op_points.items()
-                )
-            )
+            logger.info(metrics.to_json_compact())
 
         time_end_epoch = time.time()
         epoch_time_sec = time_end_epoch - epoch_start
