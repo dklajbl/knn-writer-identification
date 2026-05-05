@@ -1,12 +1,13 @@
 import argparse
+import json
 import logging
 import os
 import sys
 import time
-from contextlib import nullcontext
 
 import numpy as np
 
+from src.eval import IdentificationMetrics
 
 np.bool = bool
 
@@ -117,7 +118,9 @@ def parse_args() -> argparse.Namespace:
         type=float,
         help="Temperature for NTXent loss."
     )
+    parser.add_argument("--max-stale-epochs", default=5, type=int, help="Maximum number of consecutive epochs without improvement before stopping training.")
     parser.add_argument("--out-checkpoints-dir", default='.', type=str)
+    parser.add_argument("--out-model-name", default='knn_model', type=str)
     parser.add_argument("--show-dir", default='.', type=str)
 
     parser.add_argument("--num-workers", default=4, type=int, help="Number of DataLoader worker processes.")
@@ -150,6 +153,39 @@ def parse_args() -> argparse.Namespace:
         parser.error("--sift-keypoints-lmdb is required when --patcher is 'sift'.")
 
     return args
+
+def set_model_args(model_args: argparse.Namespace, checkpoint_args: argparse.Namespace) -> None:
+    """
+    Update model_args with values from checkpoint_args for keys that are relevant to the model.
+
+    This is used when resuming training from a checkpoint to ensure that the model is configured
+    consistently with the original training run, even if some arguments (like learning rate) are
+    overridden by command-line parameters.
+
+    Parameters:
+        model_args (argparse.Namespace): The current model arguments that may have been overridden by command-line inputs.
+        checkpoint_args (argparse.Namespace): The arguments loaded from the checkpoint, which contain the original training configuration.
+    """
+    # Define which argument keys are relevant for the model configuration
+    relevant_keys = {
+        "patcher",
+        "patch_count",
+        "patch_height",
+        "patch_width",
+        "embed_dim",
+        "learning_rate",
+        "weight_decay",
+        "temperature",
+        "samples_per_author",
+        "min_authors_per_batch",
+        "gt_file",
+        "gt_file_gallery",
+        "gt_file_query",
+    }
+
+    for key in relevant_keys:
+        if hasattr(checkpoint_args, key):
+            setattr(model_args, key, getattr(checkpoint_args, key))
 
 def log_args(args: argparse.Namespace, logger=None) -> None:
     """Print parsed arguments, one per line, aligned by the longest name."""
@@ -213,6 +249,98 @@ def create_model(args, device: torch.device) -> torch.nn.Module:
         image_encoder.load_state_dict(torch.load(checkpoint_path, map_location=device))
 
     return image_encoder
+
+def save_checkpoint(model: torch.nn.Module, optimizer: torch.optim.Optimizer, loss_optimizer: torch.optim.Optimizer, epoch: int, metrics: IdentificationMetrics, stop_counter: int, args) -> None:
+    """
+    Save model checkpoint.
+
+    Parameters:
+        model (torch.nn.Module): Model to save.
+        optimizer (torch.optim.Optimizer): Optimizer whose state to save.
+        loss_optimizer (torch.optim.Optimizer): Loss optimizer whose state to save.
+        epoch (int): Current epoch number, used for naming the checkpoint file.
+        metrics (dict): Evaluation metrics to save alongside the checkpoint.
+        stop_counter (int): Number of consecutive epochs without improvement, saved for potential use in resuming training.
+        args (argparse.Namespace): Parsed arguments containing output directory and model name.
+    """
+    metrics_json = metrics.to_json_compact() if metrics else None
+    checkpoint = {
+        "model_state_dict": model.state_dict(),
+        "optimizer_state_dict": optimizer.state_dict(),
+        "loss_optimizer_state_dict": loss_optimizer.state_dict(),
+        "epoch": epoch,
+        "stop_counter": stop_counter,
+        "mAP": metrics.csi_metrics.mAP if metrics else None,
+        "args": dict(vars(args)),
+    }
+    checkpoint_dir = os.path.join(args.out_checkpoints_dir, f"{args.out_model_name}")
+    os.makedirs(checkpoint_dir, exist_ok=True)
+    args_path = os.path.join(checkpoint_dir, f"{args.out_model_name}_args.json")
+    checkpoint_path = os.path.join(checkpoint_dir, f"{args.out_model_name}.img.ckpt")
+    metrics_path = os.path.join(checkpoint_dir, f"{args.out_model_name}_metrics.json")
+    tmp_path = checkpoint_path + ".tmp"
+    torch.save(checkpoint, tmp_path)
+    os.replace(tmp_path, checkpoint_path)
+    with open(metrics_path, "w") as f:
+        f.write(metrics_json if metrics else "{}")
+    with open(args_path, "w") as f:
+        json.dump(vars(args), f, indent=4)
+    logger.info(f"Saved checkpoint: {checkpoint_dir}")
+
+def load_args_from_checkpoint(checkpoint_path: str, device: torch.device) -> argparse.Namespace:
+    """
+    Load arguments from a checkpoint file.
+
+    Parameters:
+        checkpoint_path (str): Path to the checkpoint file.
+        device (torch.device): Device to map the loaded checkpoint to.
+    Returns:
+        argparse.Namespace: Arguments loaded from the checkpoint.
+    """
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
+    args_dict = checkpoint.get("args", {})
+    return argparse.Namespace(**args_dict)
+
+def load_checkpoint(model: torch.nn.Module, optimizer: torch.optim.Optimizer, loss_optimizer: torch.optim.Optimizer, checkpoint_path: str, device: torch.device) -> tuple[int, int, float]:
+    """
+    Load model checkpoint.
+
+    Parameters:
+        model (torch.nn.Module): Model to load state into.
+        optimizer (torch.optim.Optimizer): Optimizer to load state into.
+        loss_optimizer (torch.optim.Optimizer): Loss optimizer to load state into.
+        checkpoint_path (str): Path to the checkpoint file.
+        device (torch.device): Device to map the loaded checkpoint to.
+
+    Returns:
+        int: The epoch number from which the checkpoint was loaded.
+        int: The stop counter value from the checkpoint, indicating how many consecutive epochs without improvement have occurred.
+        float: The mAP value from the checkpoint, representing the best evaluation metric achieved up to that point.
+    """
+    logger.info(f"Loading checkpoint from {checkpoint_path}")
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
+    mAP = checkpoint.get("mAP", 0.0)
+    model.load_state_dict(checkpoint["model_state_dict"])
+    optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+    loss_optimizer.load_state_dict(checkpoint["loss_optimizer_state_dict"])
+    epoch = checkpoint.get("epoch", 0)
+    stop_counter = checkpoint.get("stop_counter", 0)
+    logger.info(f"Loaded checkpoint from epoch {epoch}")
+    return epoch, stop_counter, mAP
+
+def checkpoint_exists(args) -> bool:
+    """
+    Check if a checkpoint file exists for the given arguments.
+
+    Parameters:
+        args (argparse.Namespace): Parsed arguments containing output directory and model name.
+
+    Returns:
+        bool: True if the checkpoint file exists, False otherwise.
+    """
+    checkpoint_dir = os.path.join(args.out_checkpoints_dir, f"{args.out_model_name}")
+    checkpoint_path = os.path.join(checkpoint_dir, f"{args.out_model_name}.img.ckpt")
+    return os.path.isfile(checkpoint_path)
 
 
 def create_train_dataset(args) -> IdDataset:
@@ -438,15 +566,19 @@ def main() -> None:
     Main training entry point.
     """
     time_start = time.time()
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     args = parse_args()
+    checkpoint_dir = os.path.join(args.out_checkpoints_dir, f"{args.out_model_name}")
+    if checkpoint_exists(args):
+        checkpoint_args = load_args_from_checkpoint(
+            checkpoint_path=os.path.join(checkpoint_dir, f"{args.out_model_name}.img.ckpt"),
+            device=device,
+        )
+        set_model_args(args, checkpoint_args)
 
     configure_logging(args.logging_level)
 
-    # logger.info("\t\t\n".join(sys.argv))
-    # logger.info(f"ARGS {args}")
     log_args(args, logger)
-
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # spawn start method is often safer when DataLoader uses workers.
     torch.multiprocessing.set_start_method("spawn")
@@ -482,6 +614,20 @@ def main() -> None:
     epoch = 0
 
     time_setup_finished = time.time()
+
+    best_mAP = 0.0
+    stop_counter = 0
+
+    if checkpoint_exists(args):
+        checkpoint_dir = os.path.join(args.out_checkpoints_dir, f"{args.out_model_name}")
+        epoch, stop_counter, best_mAP = load_checkpoint(
+            model=image_encoder,
+            optimizer=optimizer,
+            loss_optimizer=loss_optimizer,
+            checkpoint_path=os.path.join(checkpoint_dir, f"{args.out_model_name}.img.ckpt"),
+            device=device,
+        )
+        logger.info(f"Resuming training from epoch {epoch} with previous best mAP {best_mAP:.4f}")
 
     while True:
         epoch += 1
@@ -525,14 +671,15 @@ def main() -> None:
         # --- evaluation ---
         eval_start = time.time()
         image_encoder.eval()
+        epoch_metrics = None
         with torch.no_grad():
-            metrics = eval_identification(
+            epoch_metrics = eval_identification(
                 encoder=image_encoder,
                 gallery_dataloader=gallery_dataloader,
                 query_dataloader=query_dataloader,
                 device=device,
             )
-            logger.info(metrics.to_json_compact())
+            logger.info(epoch_metrics.to_json_compact())
 
         time_end_epoch = time.time()
         epoch_time_sec = time_end_epoch - epoch_start
@@ -543,7 +690,25 @@ def main() -> None:
         avg_loss = epoch_loss_sum / max(epoch_steps, 1)
         logger.info(f"Epoch {epoch} | avg loss: {avg_loss:.4f} | time: {epoch_time} | train time: {train_time} | eval time: {eval_time}")
 
-        if epoch >= args.epochs:
+        if epoch_metrics.csi_metrics.mAP > best_mAP:
+            stop_counter = 0
+            best_mAP = epoch_metrics.csi_metrics.mAP
+            save_checkpoint(
+                model=image_encoder,
+                optimizer=optimizer,
+                loss_optimizer=loss_optimizer,
+                epoch=epoch,
+                metrics=epoch_metrics,
+                stop_counter=stop_counter,
+                args=args,
+            )
+        else:
+            stop_counter += 1
+
+        if epoch >= args.epochs or stop_counter >= args.max_stale_epochs:
+            if stop_counter >= args.max_stale_epochs:
+                logger.info(f"No improvement in mAP for {stop_counter} consecutive epochs. Stopping training.")
+            logger.info(f"Exiting training loop. Epoch {epoch} completed. Best mAP: {best_mAP:.4f}.")
             break
 
     time_end = time.time()
