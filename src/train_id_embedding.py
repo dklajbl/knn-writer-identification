@@ -138,12 +138,14 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
-        "--min-authors-per-batch",
+        "--num-authors-per-batch",
         type=int,
         default=2,
         help=(
-            "Minimum number of distinct authors that must appear in every "
-            "training batch. Must be <= batch-size. Default: 2."
+            "Number of different authors in each batch. "
+            "Must be at least 2 for contrastive learning. "
+            "Must be deviser of batch size. "
+            "Number of samples per author is then batch_size // num_authors_per_batch. "
         ),
     )
 
@@ -177,7 +179,7 @@ def set_model_args(model_args: argparse.Namespace, checkpoint_args: argparse.Nam
         "weight_decay",
         "temperature",
         "samples_per_author",
-        "min_authors_per_batch",
+        "num_authors_per_batch",
         "gt_file",
         "gt_file_gallery",
         "gt_file_query",
@@ -374,7 +376,6 @@ def create_train_dataset(args) -> IdDataset:
         augment=True,
         patcher_config=patcher_config,
         samples_per_author=args.samples_per_author,
-        min_authors_per_batch=args.min_authors_per_batch,
     )
 
 
@@ -398,7 +399,7 @@ def create_train_dataloader(args, train_dataset: IdDataset) -> DataLoader:
     batch_sampler = AuthorStratifiedBatchSampler(
         dataset=train_dataset,
         batch_size=args.batch_size,
-        min_authors=args.min_authors_per_batch,
+        num_authors=args.num_authors_per_batch,
         drop_last=True,
     )
 
