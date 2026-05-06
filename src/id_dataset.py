@@ -21,9 +21,9 @@ logger = logging.getLogger(__name__)
 
 class AuthorStratifiedBatchSampler(torch.utils.data.Sampler):
     """
-    Batch sampler that guarantees at least ``min_authors`` distinct authors appear
-    in every batch.  Within a batch the remaining slots are filled randomly from
-    the epoch's active sample list.
+    Batch sampler that guarantees exactly ``num_authors`` distinct authors appear
+    in every batch, each represented by exactly ``batch_size // num_authors`` samples.
+    Every sample is used at most once per epoch.
 
     The sampler works on the flat ``dataset.lines`` list that is rebuilt by
     ``IdDataset.resample_epoch()``.  Call ``resample_epoch()`` on the dataset
@@ -34,8 +34,8 @@ class AuthorStratifiedBatchSampler(torch.utils.data.Sampler):
         dataset (IdDataset): The dataset whose ``.lines`` and ``.id_lines``
             attributes describe the active epoch samples.
         batch_size (int): Total number of samples per batch.
-        min_authors (int): Minimum number of distinct authors that must appear
-            in every batch.  Must satisfy ``min_authors <= batch_size``.
+        num_authors (int): Exact number of distinct authors per batch.
+            Must evenly divide ``batch_size``.
         drop_last (bool): If True, the last incomplete batch is dropped.
     """
 
@@ -43,49 +43,43 @@ class AuthorStratifiedBatchSampler(torch.utils.data.Sampler):
         self,
         dataset: "IdDataset",
         batch_size: int,
-        min_authors: int,
+        num_authors: int,
         drop_last: bool = True,
     ):
         super().__init__()
 
-        if min_authors > batch_size:
+        if batch_size % num_authors != 0:
             raise ValueError(
-                f"min_authors ({min_authors}) must be <= batch_size ({batch_size})."
+                f"num_authors ({num_authors}) must evenly divide batch_size ({batch_size})."
             )
 
         self.dataset = dataset
         self.batch_size = batch_size
-        self.min_authors = min_authors
+        self.num_authors = num_authors
+        self.samples_per_author = batch_size // num_authors
         self.drop_last = drop_last
 
-    # ------------------------------------------------------------------
-    # helpers
-    # ------------------------------------------------------------------
-
-    def _build_index(self):
+    def _build_slots(self) -> list[tuple[int, list[int]]]:
         """
-        Return two structures derived from the *current* dataset.lines:
-
-        - ``author_to_indices``: dict mapping cluster_id -> list[int] of flat
-          indices into dataset.lines.
-        - ``all_indices``: shuffled list of all flat indices.
+        Build a shuffled list of slots where each slot is
+        (author_id, [samples_per_author indices]).
+        Authors with fewer samples than samples_per_author are excluded.
+        Leftover samples that don't fill a complete slot are dropped.
         """
         author_to_indices: dict[int, list[int]] = defaultdict(list)
         for flat_idx, (cluster_id, _) in enumerate(self.dataset.lines):
             author_to_indices[cluster_id].append(flat_idx)
 
-        # shuffle within each author bucket
-        for bucket in author_to_indices.values():
-            random.shuffle(bucket)
+        slots: list[tuple[int, list[int]]] = []
+        for author, idxs in author_to_indices.items():
+            if len(idxs) < self.samples_per_author:
+                continue
+            random.shuffle(idxs)
+            for i in range(0, len(idxs) - len(idxs) % self.samples_per_author, self.samples_per_author):
+                slots.append((author, idxs[i : i + self.samples_per_author]))
 
-        all_indices = list(range(len(self.dataset.lines)))
-        random.shuffle(all_indices)
-
-        return author_to_indices, all_indices
-
-    # ------------------------------------------------------------------
-    # public interface
-    # ------------------------------------------------------------------
+        random.shuffle(slots)
+        return slots
 
     def __len__(self) -> int:
         n = len(self.dataset.lines)
@@ -94,52 +88,31 @@ class AuthorStratifiedBatchSampler(torch.utils.data.Sampler):
         return math.ceil(n / self.batch_size)
 
     def __iter__(self):
-        author_to_indices, all_indices = self._build_index()
+        slots = self._build_slots()
 
-        # cycling iterators per author so we can keep drawing from them
-        from itertools import cycle
-        author_cycles = {
-            author: cycle(idxs)
-            for author, idxs in author_to_indices.items()
-        }
-        authors_list = list(author_to_indices.keys())
+        while True:
+            # collect one slot per author until we have num_authors distinct authors
+            batch_slots: list[tuple[int, list[int]]] = []
+            used_authors: set[int] = set()
+            skipped: list[tuple[int, list[int]]] = []
 
-        # pool of indices to fill non-mandatory slots; we consume from the
-        # shuffled flat list and track what has already been added to a batch
-        # via a set so we avoid duplicates inside a single batch.
-        pool = iter(all_indices)
+            for slot in slots:
+                if len(batch_slots) == self.num_authors:
+                    skipped.append(slot)
+                elif slot[0] not in used_authors:
+                    batch_slots.append(slot)
+                    used_authors.add(slot[0])
+                else:
+                    skipped.append(slot)
 
-        total_batches = len(self)
-        for _ in range(total_batches):
-            batch: list[int] = []
-            used_in_batch: set[int] = set()
+            if len(batch_slots) < self.num_authors:
+                # not enough distinct authors left to form a full batch
+                break
 
-            # --- guarantee min_authors distinct authors ---
-            # pick min_authors authors at random (without replacement for this batch)
-            chosen_authors = random.sample(authors_list, min(self.min_authors, len(authors_list)))
-            for author in chosen_authors:
-                idx = next(author_cycles[author])
-                batch.append(idx)
-                used_in_batch.add(idx)
+            slots = skipped
 
-            # --- fill remaining slots from the global shuffled pool ---
-            while len(batch) < self.batch_size:
-                try:
-                    idx = next(pool)
-                except StopIteration:
-                    # restart pool if exhausted before all batches are filled
-                    random.shuffle(all_indices)
-                    pool = iter(all_indices)
-                    idx = next(pool)
-
-                if idx not in used_in_batch:
-                    batch.append(idx)
-                    used_in_batch.add(idx)
-
-            # spread the batch samples in random order so the DataLoader
-            # sees them interleaved rather than grouped by author
+            batch = [idx for _, idxs in batch_slots for idx in idxs]
             random.shuffle(batch)
-
             yield batch
 
 
@@ -170,7 +143,6 @@ class IdDataset(torch.utils.data.Dataset):
         test: bool = False,
         patcher_config: PatcherConfig | None = None,
         samples_per_author: int | None = None,
-        min_authors_per_batch: int = 2,
     ):
         """
         Initialize the dataset.
@@ -185,10 +157,6 @@ class IdDataset(torch.utils.data.Dataset):
             samples_per_author (int | None): How many samples to draw per author
                 each epoch.  None disables per-epoch resampling (original
                 behaviour).
-            min_authors_per_batch (int): Minimum number of distinct authors that
-                must appear in every training batch.  Stored here so callers can
-                create an ``AuthorStratifiedBatchSampler`` with the matching
-                value.
 
         Raises:
             ValueError: if patcher_config is not provided.
@@ -205,7 +173,6 @@ class IdDataset(torch.utils.data.Dataset):
         self.restrict_data = restrict_data
         self.test = test
         self.samples_per_author = samples_per_author
-        self.min_authors_per_batch = min_authors_per_batch
 
         self.patcher = make_patcher(patcher_config)
 
