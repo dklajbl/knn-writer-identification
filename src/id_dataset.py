@@ -158,10 +158,7 @@ class IdDataset(torch.utils.data.Dataset):
             samples_per_author (int | None): How many samples to draw per author
                 each epoch.  None disables per-epoch resampling (original
                 behaviour).
-<<<<<<< HEAD
-=======
             data_fraction (float): Fraction of dataset to use for training
->>>>>>> e6f96c4 (merged with main)
 
         Raises:
             ValueError: if patcher_config is not provided.
