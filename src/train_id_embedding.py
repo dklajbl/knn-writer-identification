@@ -112,16 +112,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--learning-rate", default=0.0002, type=float)
     parser.add_argument("--weight-decay", default=0.01, type=float)
 
-    parser.add_argument(
-        "--temperature",
-        default=0.5,
-        type=float,
-        help="Temperature for NTXent loss."
-    )
     parser.add_argument("--max-stale-epochs", default=5, type=int, help="Maximum number of consecutive epochs without improvement before stopping training.")
+    parser.add_argument("--stop-checkpointing", action="store_true")
     parser.add_argument("--out-checkpoints-dir", default='.', type=str)
     parser.add_argument("--out-model-name", default='knn_model', type=str)
     parser.add_argument("--show-dir", default='.', type=str)
+
+    parser.add_argument("--loss-margin", default=28.6, type=float, help="ArcFace margin in degrees.")
+    parser.add_argument("--loss-scale", default=64, type=float, help="ArcFace scale factor.")
 
     parser.add_argument("--num-workers", default=4, type=int, help="Number of DataLoader worker processes.")
     parser.add_argument("--logging-level", default="INFO")
@@ -185,7 +183,6 @@ def set_model_args(model_args: argparse.Namespace, checkpoint_args: argparse.Nam
         "embed_dim",
         "learning_rate",
         "weight_decay",
-        "temperature",
         "samples_per_author",
         "num_authors_per_batch",
         "gt_file",
@@ -273,6 +270,9 @@ def save_checkpoint(model: torch.nn.Module, optimizer: torch.optim.Optimizer, lo
         stop_counter (int): Number of consecutive epochs without improvement, saved for potential use in resuming training.
         args (argparse.Namespace): Parsed arguments containing output directory and model name.
     """
+    if args.stop_checkpointing:
+        logger.info("Checkpointing is disabled. Skipping saving checkpoint.")
+        return
     metrics_json = metrics.to_json_compact() if metrics else None
     checkpoint = {
         "model_state_dict": model.state_dict(),
@@ -348,6 +348,8 @@ def checkpoint_exists(args) -> bool:
     Returns:
         bool: True if the checkpoint file exists, False otherwise.
     """
+    if args.stop_checkpointing:
+        return False
     checkpoint_dir = os.path.join(args.out_checkpoints_dir, f"{args.out_model_name}")
     checkpoint_path = os.path.join(checkpoint_dir, f"{args.out_model_name}.img.ckpt")
     return os.path.isfile(checkpoint_path)
@@ -603,19 +605,19 @@ def main() -> None:
     loss_object = losses.ArcFaceLoss(
         num_classes=len(train_dataset.id_lines),
         embedding_size=args.embed_dim,
-        margin=28.6,
-        scale=64,
+        margin=args.loss_margin, #28.6,
+        scale=args.loss_scale #64,
     ).to(device)
 
     loss_optimizer = torch.optim.AdamW(
         loss_object.parameters(),
-        lr=args.learning_rate * 0.1,
+        lr=args.learning_rate,
         weight_decay=args.weight_decay,
     )
 
     optimizer = torch.optim.AdamW(
         image_encoder.parameters(),
-        lr=args.learning_rate,
+        lr=args.learning_rate * 0.5,
         weight_decay=args.weight_decay,
     )
 

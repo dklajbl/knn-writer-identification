@@ -205,7 +205,7 @@ class WriterIdentificationEncoder(nn.Module):
         dim_feedforward: int = 1024,
         dropout: float = 0.1,
         use_positional_encoding: bool = False,
-        max_patches: int = 500,
+        max_patches: int = 5000,
         num_pool_heads: int = 4,
     ) -> None:
 
