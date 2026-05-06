@@ -112,7 +112,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--learning-rate", default=0.0002, type=float)
     parser.add_argument("--weight-decay", default=0.01, type=float)
 
-
     parser.add_argument(
         "--temperature",
         default=0.5,
