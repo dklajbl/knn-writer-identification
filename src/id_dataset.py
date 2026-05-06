@@ -143,6 +143,7 @@ class IdDataset(torch.utils.data.Dataset):
         test: bool = False,
         patcher_config: PatcherConfig | None = None,
         samples_per_author: int | None = None,
+        data_fraction: float = 1.0,
     ):
         """
         Initialize the dataset.
@@ -173,6 +174,7 @@ class IdDataset(torch.utils.data.Dataset):
         self.restrict_data = restrict_data
         self.test = test
         self.samples_per_author = samples_per_author
+        self.data_fraction = data_fraction
 
         self.patcher = make_patcher(patcher_config)
 
@@ -193,6 +195,9 @@ class IdDataset(torch.utils.data.Dataset):
         self._usage_counts: dict[int, dict[str, int]] = {}
 
         self._load_lines()
+
+        if self.data_fraction < 1.0:
+            self._subsample_authors(self.data_fraction)
 
         if self.augment:
             self.uniformize_data_distribution()
@@ -243,6 +248,27 @@ class IdDataset(torch.utils.data.Dataset):
 
         for cluster_id, image_name in self.lines:
             self.id_lines[cluster_id].append(image_name)
+
+    def _subsample_authors(self, fraction: float) -> None:
+
+        """
+        Randomly retain a fraction of authors from the loaded catalogue.
+
+        Parameters:
+            fraction (float): Proportion of authors to keep (0.0–1.0). At least 2 authors are always kept.
+        """
+
+        all_ids = list(self.id_lines.keys())
+        keep_n = max(2, int(len(all_ids) * fraction))
+        kept_ids = set(random.sample(all_ids, keep_n))
+
+        self.id_lines = {cid: names for cid, names in self.id_lines.items() if cid in kept_ids}
+        self.lines = [(cid, name) for cid, name in self.lines if cid in kept_ids]
+
+        # re-remap to contiguous 0-based indices to keep labels valid for ArcFaceLoss
+        remap = {old: new for new, old in enumerate(sorted(kept_ids))}
+        self.id_lines = {remap[cid]: names for cid, names in self.id_lines.items()}
+        self.lines = [(remap[cid], name) for cid, name in self.lines]
 
     def _ensure_lmdb_open(self) -> None:
         """
