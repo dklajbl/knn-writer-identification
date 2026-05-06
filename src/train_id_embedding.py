@@ -112,6 +112,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--learning-rate", default=0.0002, type=float)
     parser.add_argument("--weight-decay", default=0.01, type=float)
 
+
     parser.add_argument(
         "--temperature",
         default=0.5,
@@ -124,7 +125,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--show-dir", default='.', type=str)
 
     parser.add_argument("--num-workers", default=4, type=int, help="Number of DataLoader worker processes.")
-    parser.add_argument("--eval-on-start", action="store_true")
     parser.add_argument("--logging-level", default="INFO")
 
     parser.add_argument(
@@ -146,6 +146,15 @@ def parse_args() -> argparse.Namespace:
             "Must be at least 2 for contrastive learning. "
             "Must be deviser of batch size. "
             "Number of samples per author is then batch_size // num_authors_per_batch. "
+        ),
+    )
+    parser.add_argument(
+        "--train-data-fraction",
+        type=float,
+        default=1.0,
+        help=(
+            "Fraction of training authors to use (0.0 – 1.0). "
+            "Useful for fast hyperparameter tuning. Default: 1.0 (all data)."
         ),
     )
 
@@ -376,6 +385,7 @@ def create_train_dataset(args) -> IdDataset:
         augment=True,
         patcher_config=patcher_config,
         samples_per_author=args.samples_per_author,
+        data_fraction=args.train_data_fraction,
     )
 
 
