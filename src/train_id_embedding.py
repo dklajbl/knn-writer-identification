@@ -690,6 +690,7 @@ def main() -> None:
                 gallery_dataloader=gallery_dataloader,
                 query_dataloader=query_dataloader,
                 device=device,
+                epoch=epoch
             )
             logger.info(epoch_metrics.to_json_compact())
 

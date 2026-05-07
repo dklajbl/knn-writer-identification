@@ -22,6 +22,9 @@ class IdentificationMetrics:
     # Measured time of evaluation
     eval_time: np.float32
 
+    # Epoch number of evaluation (if applicable, otherwise -1)
+    epoch: int
+
     def to_json(self) -> str:
         """
         Returns string JSON representation of IdnetificationMetrics.

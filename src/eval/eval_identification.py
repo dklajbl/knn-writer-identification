@@ -140,7 +140,8 @@ def eval_identification(
         encoder: torch.nn.Module,
         gallery_dataloader: DataLoader,
         query_dataloader: DataLoader,
-        device: torch.device
+        device: torch.device,
+        epoch: int = -1
 ):
     """
     Evaluates encoder on closed-set and open-set identification task.
@@ -150,6 +151,7 @@ def eval_identification(
         gallery_dataloader (DataLoader): Loads gallery samples.
         query_dataloader (DataLoader): Loads query samples.
         device (torch.device): Device on which the encoder will be run.
+        epoch (int, optional): Epoch number of evaluation (if applicable, otherwise -1). Defaults to -1.
 
     Returns:
         IdentificationMetrics: Computed closed-set and open-set identification metrics.
@@ -187,4 +189,5 @@ def eval_identification(
 
     return IdentificationMetrics(csi_metrics=csi_metrics,
                                  osi_metrics=osi_metrics,
-                                 eval_time=eval_time)
+                                 eval_time=eval_time,
+                                 epoch=epoch)
