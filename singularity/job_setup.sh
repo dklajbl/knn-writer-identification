@@ -40,7 +40,9 @@ SING_CPU_IMAGE="${HOME_DIR}/containers/knn_container_cpu.sif"
 SING_GPU_IMAGE="${HOME_DIR}/containers/knn_container_gpu.sif"
 
 # singularity scrip path (script that will be executed in the singularity container)
-SING_SCRIPT="${HOME_DIR}/${PROJ_FOLDER}/singularity/singularity_script.sh"
+if [ -z "$SING_SCRIPT" ]; then
+    SING_SCRIPT="${HOME_DIR}/${PROJ_FOLDER}/singularity/singularity_script.sh"
+fi
 
 # path to source code folder
 CODE_DIR="${HOME_DIR}/${PROJ_FOLDER}/src"
