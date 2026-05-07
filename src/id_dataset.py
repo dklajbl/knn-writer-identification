@@ -139,6 +139,7 @@ class IdDataset(torch.utils.data.Dataset):
         file_name: str,
         lmdb_path: str,
         augment: bool = True,
+        uniformize: bool = False,
         restrict_data: bool = False,
         test: bool = False,
         patcher_config: PatcherConfig | None = None,
@@ -172,6 +173,7 @@ class IdDataset(torch.utils.data.Dataset):
         self.file_name = file_name
         self.lmdb_path = lmdb_path
         self.augment = augment
+        self.uniformize = uniformize
         self.restrict_data = restrict_data
         self.test = test
         self.samples_per_author = samples_per_author
@@ -200,7 +202,7 @@ class IdDataset(torch.utils.data.Dataset):
         if self.data_fraction < 1.0:
             self._subsample_authors(self.data_fraction)
 
-        if self.augment:
+        if self.uniformize:
             self.uniformize_data_distribution()
 
         if self.restrict_data:
@@ -582,6 +584,7 @@ class IdDataset(torch.utils.data.Dataset):
 
         cluster_id, name_1 = self.lines[idx]
         image_1 = self._read_line(name_1)
+        is_minority = len(self.id_lines[cluster_id]) < 200 # threshold below median
 
         if image_1 is None:
             raise RuntimeError(
@@ -598,8 +601,9 @@ class IdDataset(torch.utils.data.Dataset):
                 f"from LMDB '{self.lmdb_path}'."
             )
 
-        if self.aug is not None:
-            image_1, image_2 = self.aug(images=[image_1, image_2])
+        if self.aug is not None and is_minority:
+            image_1 = self.aug(images=[image_1])[0]
+            image_2 = self.aug(images=[image_2])[0]
 
         image_1 = self.patcher.extract_patches(image_1, key=name_1)
         image_2 = self.patcher.extract_patches(image_2, key=name_2)
