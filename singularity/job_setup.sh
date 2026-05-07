@@ -50,8 +50,16 @@ CODE_DIR="${HOME_DIR}/${PROJ_FOLDER}/src"
 
 CUR_TIME=$(date +%Y-%m-%d_%H-%M-%S)
 
+# optional note appended to the log directory name
+# pass via: qsub -v NOTE="sometext_without_spaces" job.sh
+if [ -n "$NOTE" ]; then
+    LOG_SUFFIX="_${NOTE}"
+else
+    LOG_SUFFIX=""
+fi
+
 # path to log directory
-LOG_DIR="${HOME_DIR}/knn_job_logs/job_${CUR_TIME}"
+LOG_DIR="${HOME_DIR}/knn_job_logs/job_${CUR_TIME}${LOG_SUFFIX}"
 
 # create log directory if it does not exist
 mkdir -p "$LOG_DIR"
