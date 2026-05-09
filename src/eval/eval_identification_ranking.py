@@ -111,7 +111,7 @@ def _pool_gallery_to_class_ranking(gallery_labels_ranked: np.ndarray,
         valid_counts = mask.sum(axis=1)
 
         # number of highest scores
-        k = 3
+        k = 5
 
         # effective k per row (limited by number of valid samples per query)
         k_eff = np.minimum(k, valid_counts)
