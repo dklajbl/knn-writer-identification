@@ -102,15 +102,44 @@ def _pool_gallery_to_class_ranking(gallery_labels_ranked: np.ndarray,
         # create mask for this label across all queries
         mask = (gallery_labels_ranked == label)
 
-        # max pool scores where mask is True
+        # keep only scores for current label
+        scores = np.where(mask, gallery_scores_ranked, -np.inf)
+
+        # class score == mean of Top-k scores
+
+        # number of valid samples per query
+        valid_counts = mask.sum(axis=1)
+
+        # number of highest scores
+        k = 3
+
+        # effective k per row (limited by number of valid samples per query)
+        k_eff = np.minimum(k, valid_counts)
+
+        # top-k extraction
+        topk = np.partition(scores, -k, axis=1)[:, -k:]
+
+        # invalidate rows with no matches
+        topk = np.where(np.isfinite(topk), topk, 0.0)
+
+        # mean only over valid entries
         class_scores[:, i] = np.where(
-            # check if the label appears in the row at least once
-            mask.any(axis=1),
-            np.max(
-                np.where(mask, gallery_scores_ranked, -np.inf),
-                axis=1),  # max score for the current label row-wise
+            valid_counts > 0,
+            topk.sum(axis=1) / k_eff,
             -np.inf
         )
+
+        # # alternative class ranking
+        # # class score == Top-1 score
+        # # max pool scores where mask is True
+        # class_scores[:, i] = np.where(
+        #     # check if the label appears in the row at least once
+        #     mask.any(axis=1),
+        #     np.max(
+        #         np.where(mask, gallery_scores_ranked, -np.inf),
+        #         axis=1),  # max score for the current label row-wise
+        #     -np.inf
+        # )
 
     # get labels corresponding to the scores
     # simply repeat row-wise the unique labels as scores are in this order
