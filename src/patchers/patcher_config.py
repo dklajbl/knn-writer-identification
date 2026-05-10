@@ -4,8 +4,8 @@ from dataclasses import dataclass
 
 
 # all supported patching methods
-PATCH_METHODS = ["grid", "random", "sift"]
-PatchMethodLiteral = Literal["grid", "random", "sift"]  # a literal for variable types
+PATCH_METHODS = ["grid", "random", "sift", "single"]
+PatchMethodLiteral = Literal["grid", "random", "sift", "single"]  # a literal for variable types
 
 
 @dataclass(frozen=True)

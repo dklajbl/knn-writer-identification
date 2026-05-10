@@ -16,6 +16,7 @@ from torch.utils.data import DataLoader
 
 from pytorch_metric_learning import losses
 
+from src.model_baseline import WriterEncoderResNET18
 from src.model import WriterIdentificationEncoder
 from src.id_dataset import IdDataset, AuthorStratifiedBatchSampler
 from src.utils import convert_sec_to_hours_minutes_seconds
@@ -239,16 +240,21 @@ def create_model(args, device: torch.device) -> torch.nn.Module:
         torch.nn.Module: Initialised encoder model.
     """
 
-    image_encoder = WriterIdentificationEncoder(
-        in_channels=1,
-        hidden_dim=256,
-        embed_dim=args.embed_dim,
-        nhead=8,
-        num_transformer_layers=2,
-        dim_feedforward=1024,
-        dropout=0.1,
-        use_positional_encoding=(args.patcher == "grid"),
-    ).to(device)
+    if args.patcher == "single":
+        image_encoder = WriterEncoderResNET18(
+            embedding_dim=args.embed_dim,
+        ).to(device)
+    else:
+        image_encoder = WriterIdentificationEncoder(
+            in_channels=1,
+            hidden_dim=256,
+            embed_dim=args.embed_dim,
+            nhead=8,
+            num_transformer_layers=2,
+            dim_feedforward=1024,
+            dropout=0.1,
+            use_positional_encoding=(args.patcher == "grid"),
+        ).to(device)
 
     if args.start_iteration > 0:
         checkpoint_path = os.path.join(args.out_checkpoints_dir, f"cp-{args.start_iteration:07d}.img.ckpt")

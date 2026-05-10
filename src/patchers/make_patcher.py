@@ -3,6 +3,7 @@ from src.patchers.base_patcher import BasePatcher
 from src.patchers.grid_patcher import GridPatcher
 from src.patchers.random_patcher import RandomPatcher
 from src.patchers.sift_patcher import SIFTPatcher
+from src.patchers.single_patcher import SinglePatcher
 
 
 def make_patcher(config: PatcherConfig) -> BasePatcher:
@@ -31,5 +32,8 @@ def make_patcher(config: PatcherConfig) -> BasePatcher:
 
     if config.method == "sift":
         return SIFTPatcher(config)
+
+    if config.method == "single":
+        return SinglePatcher(config)
 
     raise ValueError(f"Unknown patch method: {config.method}")
