@@ -1,24 +1,30 @@
 # Identification of writers by handwriting.
+### Authors: *Samuel Kiszka, David Klajbl, Matúš Pestun*
+### Supervisor: *Ing. Jan Kohút*
 
-**Code:**
-
-- Function descriptions
+### Project file structure:
+```text
+knn-writer-identification/
+│
+├── doc/                    # Documentation
+|
+├── singularity/            # Singularity environment setup utilities
+│
+├── src/                    # Implementation
+│   │
+│   ├── model.py                # Proposed model
+│   ├── model_baseline.py       # Baseline model
+│   ├── train_id_embedding.py   # Model training script
+│   ├── test_model.py           # Model testing script
+│   ├── id_dataset.py           # Pytorch dataset class
+│   ├── eval/                   # Model evaluation utilities
+│   ├── patchers/               # Image patching utilities
+│   └── ...                     # Other helper utilities
+│
+└── requirements_*.txt      # Python dependencies
 ```
-def add(a, b):
-    """
-    Add two numbers.
+### Acknowledgements
+Some parts of this project are based on code provided by the supervisor Ing. Jan Kohút and were modified for use in this project.
 
-    Parameters:
-        a (int): First number.
-        b (int): Second number.
-
-    Returns:
-        int: Sum of a and b.
-    """
-    return a + b
-print(add(3, 7))
-```
-
-- Naming conventions:
-    - premenne, funkcie: snake_case
-    - triedy: CamelCase
+### AI Assistance Disclaimer
+Some parts of this project’s source code were developed with assistance from AI tools.
