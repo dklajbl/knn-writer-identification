@@ -1,4 +1,4 @@
-# Identification of writers by handwriting.
+# Identification of writers by handwriting
 ### Authors: *Samuel Kiszka, David Klajbl, Matúš Pestun*
 ### Supervisor: *Ing. Jan Kohút*
 
